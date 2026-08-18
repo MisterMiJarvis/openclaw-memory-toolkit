@@ -38,8 +38,8 @@ python3 scripts/trace_extractor.py --days 1
 # Deep extraction (LLM-powered, ~60-180s)
 python3 scripts/trace_extractor.py --days 3 --llm
 
-# With session transcripts
-python3 scripts/trace_extractor.py --days 1 --llm --sessions
+# With a specific session transcript file (opt-in, explicit)
+python3 scripts/trace_extractor.py --days 1 --llm --session-file /path/to/session.jsonl
 
 # Preview only
 python3 scripts/trace_extractor.py --days 1 --llm --dry-run
@@ -136,6 +136,7 @@ Environment variables with defaults:
 | `WORKSPACE` | `~/.openclaw/workspace` | OpenClaw workspace path |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL |
 | `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
+| `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
 
 ## Requirements
 
@@ -179,10 +180,14 @@ MIT — free to use, modify, and share.
 
 - ⚠️ **Nightly cron modifies files by default**: `auto_archive.py` moves files, `scoring.py` writes scores.json, `consolidate_advisor.py` writes consolidation_report.json. Review cron commands before deploying.
 - ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to archive/ and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.
-- ⚠️ **`--force` flag**: The `--force` flag exists on `consolidate_advisor.py` and `memory-health.py` for non-interactive/cron use. It skips confirmation prompts. Only use in trusted automation with backups in place.
-- ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag.
-- ⚠️ **OLLAMA_URL should stay localhost**: LLM calls (trace extraction, cluster summaries, embeddings) send memory text to Ollama. Keep `OLLAMA_URL=http://localhost:11434` to prevent data from leaving the machine.
-- ⚠️ **Subprocess and urlopen are intentional local calls**: Scripts use `subprocess.run` to call other local Python scripts (trace_extractor, locomo_test) and `urllib.request.urlopen` to call the local Ollama HTTP API. These are intentional local-only calls. Keep `OLLAMA_URL` on localhost to prevent data from leaving the machine.
+- ⚠️ **`--force` flag**: The `--force` flag exists on `consolidate_advisor.py` and `memory-health.py` for non-interactive/cron use. It skips confirmation prompts. Requires existing verified backup. Only use in trusted automation with backups in place.
+- ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag. Dry-run is the default when `--apply-promotions` is used without `--force`.
+- ⚠️ **OLLAMA_URL restricted to localhost**: LLM calls (trace extraction, cluster summaries, embeddings) send memory text to Ollama. URL is validated to be `localhost`, `127.0.0.1`, or `::1` only — no remote hosts allowed.
+- ⚠️ **PII sanitization before LLM calls**: Both `trace-extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` (regex-based removal of API keys, tokens, emails, passwords, PEM keys) before sending to any LLM. A console warning is printed before each LLM submission.
+- ⚠️ **Session transcripts are opt-in only**: `trace-extractor.py` no longer scans `~/.openclaw/agents/` globally. Use `--session-file <path>` to explicitly provide a single transcript file. Paths are confined to the workspace.
+- ⚠️ **`scores.json` stores hashes, not raw text**: `scoring.py` replaces note text with SHA256 hashes (first 16 chars) in all JSON output. File permissions set to `0o600` (owner-only read/write).
+- ⚠️ **`EXTRACTION_PROMPT` excludes secrets**: The LLM extraction prompt explicitly instructs the model to never extract credentials, API keys, tokens, passwords, personal data, or session IDs.
+- ⚠️ **Subprocess paths confined to workspace**: `subprocess.run` targets are validated with `Path.resolve()` + `is_relative_to(WORKSPACE)` before execution. No `os.environ` path injection possible.
 - ⚠️ **Memory files may contain sensitive data**: Review all files before indexing with hybrid search. The `scoring.py` script skips files matching secret patterns (`.secrets/`, `*.env`, `credentials*`, `*token*`, `*password*`, `.git/`).
 - ⚠️ **Hybrid search consent warnings**: `hybrid_search.py` `index` command displays a consent warning before batch embedding. Use `--yes` to skip in automation. `add` command prints a one-line embedding notice (use `--quiet` to suppress).
 - ⚠️ **`--benchmark` is benchmark-only**: `memory-health.py --benchmark` runs only the LoCoMo benchmark, skipping all other health checks. Combine with `--deep` or `--quick` to run both.
