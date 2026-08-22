@@ -20,9 +20,13 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace")).resolve()
 MEMORY_DIR = WORKSPACE / "memory"
 ARCHIVE_DIR = MEMORY_DIR / "archive"
+
+# Security: validate MEMORY_DIR is within WORKSPACE
+if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
+    raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
 
 # Daily note pattern: YYYY-MM-DD optionally followed by -suffix
 DAILY_NOTE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-.+)?\.md$")

@@ -1,6 +1,10 @@
-__pycache__/
+.secrets/
 results/
-hybrid-search-proto/
-hybrid-search/__pycache__/
+*.svg
+eval_output/
+__pycache__/
+*.log
+*.pyc
 hybrid-search/agent_memory.db
 hybrid-search/test_results.json
+hybrid-search-proto/

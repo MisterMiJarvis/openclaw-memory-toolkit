@@ -9,7 +9,7 @@ Analyzes recent daily notes + scores.json to identify:
   4. DUPLICATES — near-duplicate text across daily notes
 
 Writes consolidation_report.json by default. Modifies MEMORY.md only with --apply-promotions flag.
-The agent reviews suggestions, Stéphane validates, then changes are applied.
+The agent reviews suggestions, the user validates, then changes are applied.
 
 Uses Ollama (local LLM) for semantic grouping of similar memories.
 No external API required.
@@ -53,11 +53,15 @@ def sanitize_pii(text: str) -> str:
         text = pattern.sub('[REDACTED]', text)
     return text
 
-WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace")).resolve()
 MEMORY_DIR = WORKSPACE / "memory"
 MEMORY_FILE = WORKSPACE / "MEMORY.md"
 SCORES_FILE = MEMORY_DIR / "scores.json"
 CONSOLIDATION_REPORT = MEMORY_DIR / "consolidation_report.json"
+
+# Security: validate MEMORY_DIR is within WORKSPACE
+if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
+    raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
 
 DAILY_NOTE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-.+)?\.md$")
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -205,14 +209,15 @@ def find_promotions(scores: dict) -> list[dict]:
         if item["source"] == "MEMORY.md":
             continue  # already in MEMORY.md
 
-        # Deduplicate by text similarity
-        key = normalize_for_clustering(item["text"])
+        # Deduplicate by hash (scoring.py stores hash, not text)
+        item_key = item.get("text") or item.get("hash", "")
+        key = normalize_for_clustering(item_key)
         if key in seen_keys:
             continue
         seen_keys.add(key)
 
         promotions.append({
-            "text": item["text"],
+            "text": item.get("text", item.get("hash", "")),
             "score": item["score"],
             "category": item["category"],
             "source": item["source"],

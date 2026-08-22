@@ -31,11 +31,18 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace")).resolve()
 MEMORY_DIR = WORKSPACE / "memory"
 MEMORY_FILE = WORKSPACE / "MEMORY.md"
 SCORES_FILE = MEMORY_DIR / "scores.json"
 ONTOLOGY_FILE = MEMORY_DIR / "ontology" / "graph.jsonl"
+
+# Security: validate MEMORY_DIR is within WORKSPACE
+if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
+    raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
+
+# Security: restrict file scanning to MEMORY_DIR only — no parent traversal, no sibling skills/
+ALLOWED_SCAN_DIR = MEMORY_DIR
 
 # --- Configuration ---
 HALF_LIFE_DAYS = 14

@@ -13,14 +13,15 @@ from hybrid_search import HybridMemoryStore, get_embedding
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_memory.db")
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
+# Anonymized test queries — no real project names, personal data, or sensitive references
 TEST_QUERIES = [
-    "AstroCapture",
-    "roadmap EIIDP",
+    "project_alpha",
+    "roadmap planning quarterly",
     "memory scoring decay temporal",
-    "2026-08-17",
+    "sample_note_01",
     "sqlite-vec FTS5 hybrid search",
-    "leadership coaching Airbus",
-    "Obsidian vault PARA inbox",
+    "team leadership coaching session",
+    "knowledge base inbox archive",
 ]
 
 def run_tests():

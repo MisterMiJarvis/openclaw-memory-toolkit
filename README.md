@@ -101,15 +101,23 @@ LLM optional (Ollama) for cluster summaries. Falls back to text-based with `--no
 Comprehensive diagnostics: trace extraction, benchmark, MEMORY.md size, ontology
 health, daily notes hygiene, index status, drift detection.
 
+**READ-ONLY by default**: writes nothing to disk. Use `--output-dir <path>` to save
+JSON reports and SVG trend charts.
+
 ```bash
-python3 scripts/memory_health.py              # Full health check
-python3 scripts/memory_health.py --quick      # Skip benchmark & LLM
-python3 scripts/memory_health.py --benchmark  # Benchmark only
+python3 scripts/memory_health.py              # Full health check (read-only)
+python3 scripts/memory_health.py --quick      # Skip benchmark & LLM (read-only)
+python3 scripts/memory_health.py --benchmark  # Benchmark only (read-only)
 python3 scripts/memory_health.py --deep       # LLM + sessions + benchmark
-python3 scripts/memory_health.py --fix        # Fix mode (archive, clean)
+python3 scripts/memory_health.py --output-dir results/  # Save reports to disk
+python3 scripts/memory_health.py --fix        # Fix mode (DESTRUCTIVE)
 ```
 
-**Output:** `results/YYYY-MM-DD.json` — full diagnostic report.
+**Output:** `results/YYYY-MM-DD.json` — only with `--output-dir`.
+
+**Destructive actions (`--fix`)**: Moves daily notes >14 days old to `archive/`,
+rewrites ontology file. Creates timestamped backup before modifying. Requires
+interactive confirmation or `--force` flag.
 
 ## Ontology
 
@@ -190,5 +198,8 @@ MIT — free to use, modify, and share.
 - ⚠️ **Subprocess paths confined to workspace**: `subprocess.run` targets are validated with `Path.resolve()` + `is_relative_to(WORKSPACE)` before execution. No `os.environ` path injection possible.
 - ⚠️ **Memory files may contain sensitive data**: Review all files before indexing with hybrid search. The `scoring.py` script skips files matching secret patterns (`.secrets/`, `*.env`, `credentials*`, `*token*`, `*password*`, `.git/`).
 - ⚠️ **Hybrid search consent warnings**: `hybrid_search.py` `index` command displays a consent warning before batch embedding. Use `--yes` to skip in automation. `add` command prints a one-line embedding notice (use `--quiet` to suppress).
-- ⚠️ **`--benchmark` is benchmark-only**: `memory-health.py --benchmark` runs only the LoCoMo benchmark, skipping all other health checks. Combine with `--deep` or `--quick` to run both.
-- ⚠️ **Hybrid search `init` requires `--force`** to overwrite an existing database. Running `init` without `--force` on an existing DB will prompt for confirmation.
+- ⚠️ **`memory-health.py` is READ-ONLY by default**: No files or charts are written to disk without `--output-dir <path>`. SVG trend charts and JSON reports require this flag.
+- ⚠️ **Scope confinement**: All scripts restrict file scanning to the designated memory directory (`WORKSPACE/memory/`). No parent traversal (`../`) or sibling skill enumeration (`skills/*/SKILL.md`) is performed. Paths are validated with `Path.resolve().is_relative_to(WORKSPACE)`.
+- ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection possible. Script paths are validated against workspace confinement.
+- ⚠️ **No PII in test fixtures**: `run_tests.py` uses anonymized query terms (`project_alpha`, `sample_note_01`) — no real project names, personal names, or sensitive references.
+- ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to archive/ and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.

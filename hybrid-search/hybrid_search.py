@@ -56,7 +56,11 @@ OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBED_URL = get_safe_ollama_url("OLLAMA_EMBED_URL", OLLAMA_URL.rstrip("/") + "/api/embeddings")
 EMBED_MODEL = "nomic-embed-text"
 EMBED_DIMS = 768
-WORKSPACE = "/home/ubuntu/.openclaw/workspace"
+WORKSPACE = os.environ.get("WORKSPACE", "/home/ubuntu/.openclaw/workspace")
+# Security: restrict memory scanning to the designated memory directory only.
+# Prevents path traversal (../) and skill enumeration (scanning skills/*).
+MEMORY_DIR = os.path.join(WORKSPACE, "memory")
+ALLOWED_SCAN_DIRS = {MEMORY_DIR}  # Only memory/ is scanned — no skills/, no parent traversal
 
 # One-time embedding warning flag
 _embedding_warning_shown = False
@@ -492,14 +496,15 @@ def collect_all_files() -> list[dict]:
         })
 
     # ── SKILL.md files — procedural layer ──
-    skill_files = sorted(glob.glob(os.path.join(WORKSPACE, "skills", "*", "SKILL.md")))
-    for f in skill_files:
-        skill_name = os.path.basename(os.path.dirname(f))
+    # SECURITY: No longer glob skills/*/SKILL.md (skill enumeration vulnerability).
+    # Only index the memory-health skill's own SKILL.md (self-reference is safe).
+    own_skill = os.path.join(WORKSPACE, "skills", "memory-health", "SKILL.md")
+    if os.path.exists(own_skill):
         files.append({
-            "path": f,
+            "path": own_skill,
             "category": "skill",
             "layer": "procedural",
-            "source": f"skills/{skill_name}/SKILL.md",
+            "source": "skills/memory-health/SKILL.md",
             "score": 0.8,
         })
 
@@ -527,14 +532,12 @@ def collect_all_files() -> list[dict]:
         })
 
     # ── Root config files — procedural layer ──
+    # SECURITY: Only index non-sensitive config files. USER.md and IDENTITY.md
+    # excluded (contain personal data). AGENTS.md/SOUL.md excluded (contain
+    # persona/personal context). Only index generic config.
     root_files = [
         ("MEMORY.md", "long-term-memory", 0.9),
         ("TOOLS.md", "config", 0.7),
-        ("HEARTBEAT.md", "heartbeat", 0.2),
-        ("AGENTS.md", "config", 0.6),
-        ("SOUL.md", "config", 0.5),
-        ("USER.md", "personal", 0.8),
-        ("IDENTITY.md", "config", 0.5),
     ]
     for fname, cat, score in root_files:
         fpath = os.path.join(WORKSPACE, fname)

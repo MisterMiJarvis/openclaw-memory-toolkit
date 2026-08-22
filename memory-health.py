@@ -2,15 +2,20 @@
 """
 Memory Health — Comprehensive memory system health check.
 
+READ-ONLY by default: runs diagnostics, prints to stdout, writes nothing to disk.
+Use --output-dir <path> to save JSON reports and SVG trend charts.
+
 Runs: trace extraction, LoCoMo benchmark, size check, ontology health,
 daily notes hygiene, index status, and drift detection.
 
 Usage:
-    python3 memory-health.py              # Full health check
-    python3 memory-health.py --quick      # Skip benchmark & LLM
-    python3 memory-health.py --benchmark  # Benchmark only
+    python3 memory-health.py              # Full health check (read-only)
+    python3 memory-health.py --quick      # Skip benchmark & LLM (read-only)
+    python3 memory-health.py --benchmark  # Benchmark only (read-only)
     python3 memory-health.py --deep       # LLM + sessions + benchmark (weekly)
-    python3 memory-health.py --fix       # Fix mode (archive, clean)
+    python3 memory-health.py --output-dir results/  # Save reports to disk
+    python3 memory-health.py --fix        # Fix mode (DESTRUCTIVE: archives files, rewrites ontology)
+                                          # Requires confirmation or --force
 """
 
 import argparse
@@ -23,7 +28,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace")).resolve()
 SKILL_DIR = WORKSPACE / "skills" / "memory-health"
 RESULTS_DIR = SKILL_DIR / "results"
 MEMORY_FILE = WORKSPACE / "MEMORY.md"
@@ -32,8 +37,13 @@ DAILY_NOTES_DIR = WORKSPACE / "memory"
 TRACE_EXTRACTOR = WORKSPACE / "skills" / "trace-extractor" / "trace-extractor.py"
 # LOCOMO_TEST: hardcoded relative path — no env var to prevent taint flow
 LOCOMO_TEST = (WORKSPACE / "skills" / "locomo-test" / "locomo_test.py").resolve()
-if not LOCOMO_TEST.is_relative_to(WORKSPACE.resolve()):
+if not LOCOMO_TEST.is_relative_to(WORKSPACE):
     LOCOMO_TEST = WORKSPACE / "skills" / "locomo-test" / "locomo_test.py"
+
+# Security: validate all script paths are within WORKSPACE
+for _path in [TRACE_EXTRACTOR, LOCOMO_TEST]:
+    if not _path.resolve().is_relative_to(WORKSPACE):
+        raise RuntimeError(f"Security: script path escapes workspace: {_path}")
 
 # Thresholds
 MEMORY_MAX_SIZE = 5000  # 5KB limit
@@ -243,10 +253,7 @@ def run_benchmark():
 
 def check_drift(last_health=None):
     """Detect drift since last health check."""
-    results_dir = RESULTS_DIR
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
-    runs = sorted(results_dir.glob("*.json"))
+    runs = sorted(RESULTS_DIR.glob("*.json")) if RESULTS_DIR.exists() else []
     if not runs:
         return {"status": "🆕 First health check, no drift data"}
     
@@ -309,7 +316,7 @@ def check_memory_search():
     try:
         # SECURITY: Local subprocess execution only. Outbound HTTP calls are isolated to the local Ollama API.
         result = subprocess.run(
-            ["openclaw", "memory", "search", "Stéphane's role at Airbus"],
+            ["openclaw", "memory", "search", "project alpha configuration"],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout + result.stderr
@@ -319,7 +326,7 @@ def check_memory_search():
         latency = "unknown"
         
         return {
-            "query": "Stéphane's role at Airbus",
+            "query": "project alpha configuration",
             "has_results": has_results,
             "status": "🟢 Search works" if has_results else "🔴 No results"
         }
@@ -592,6 +599,8 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="Apply changes non-interactively. Requires existing verified backup in workspace. "
                              "Creates timestamped backup in memory/backup/ before modifying.")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory to save reports and charts. Without this flag, memory-health.py is strictly read-only.")
     args = parser.parse_args()
     
     # FIX: --benchmark alone should run ONLY the benchmark, not the full suite
@@ -605,17 +614,21 @@ def main():
         print(f"   {benchmark.get('status', benchmark.get('error', 'Unknown'))}")
         if benchmark.get('output'):
             print(f"   {benchmark['output'][:200]}")
-        # Save minimal report
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        report_file = RESULTS_DIR / f"{date.today().isoformat()}-benchmark.json"
-        clean_report = {"date": date.today().isoformat(), "mode": "benchmark-only", "benchmark": benchmark}
-        try:
-            report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
-            print(f"\n📁 Report saved to {report_file}")
-        except TypeError:
-            clean_report["benchmark"] = str(benchmark)
-            report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
-            print(f"\n📁 Report saved to {report_file}")
+        # Save minimal report (only with --output-dir)
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            report_file = output_dir / f"{date.today().isoformat()}-benchmark.json"
+            clean_report = {"date": date.today().isoformat(), "mode": "benchmark-only", "benchmark": benchmark}
+            try:
+                report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
+                print(f"\n📁 Report saved to {report_file}")
+            except TypeError:
+                clean_report["benchmark"] = str(benchmark)
+                report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
+                print(f"\n📁 Report saved to {report_file}")
+        else:
+            print("\n📖 Read-only mode — use --output-dir to save benchmark reports")
         return
     
     print("🧠 Memory Health Check")
@@ -740,16 +753,21 @@ def main():
             print(f"   ✅ {fix}")
         report["fixes"] = fixes
     
-    # 10. Trend Chart
+    # 10. Trend Chart (only with --output-dir)
     print("\n🔟 Health Trend")
-    chart = generate_trend_chart(RESULTS_DIR)
-    if chart:
-        chart_file = RESULTS_DIR / f"trend-{date.today().isoformat()}.svg"
-        chart_file.write_text(chart)
-        print(f"   📊 Chart saved to {chart_file}")
-        report["trend_chart"] = str(chart_file)
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        chart = generate_trend_chart(output_dir)
+        if chart:
+            chart_file = output_dir / f"trend-{date.today().isoformat()}.svg"
+            chart_file.write_text(chart)
+            print(f"   📊 Chart saved to {chart_file}")
+            report["trend_chart"] = str(chart_file)
+        else:
+            print("   ⏭️ Need 2+ runs for trend chart")
     else:
-        print("   ⏭️ Need 2+ runs for trend chart")
+        print("   ⏭️ Read-only mode — use --output-dir to generate charts")
     
     # Summary
     print("\n" + "=" * 50)
@@ -768,19 +786,23 @@ def main():
     else:
         print("   🟢 All checks passed")
     
-    # Save report
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    report_file = RESULTS_DIR / f"{date.today().isoformat()}.json"
-    # Remove non-serializable fields
-    clean_report = {}
-    for k, v in report.items():
-        try:
-            json.dumps(v)
-            clean_report[k] = v
-        except TypeError:
-            clean_report[k] = str(v)
-    report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
-    print(f"\n📁 Report saved to {report_file}")
+    # Save report (only with --output-dir)
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report_file = output_dir / f"{date.today().isoformat()}.json"
+        # Remove non-serializable fields
+        clean_report = {}
+        for k, v in report.items():
+            try:
+                json.dumps(v)
+                clean_report[k] = v
+            except TypeError:
+                clean_report[k] = str(v)
+        report_file.write_text(json.dumps(clean_report, indent=2, ensure_ascii=False))
+        print(f"\n📁 Report saved to {report_file}")
+    else:
+        print("\n📖 Read-only mode — use --output-dir to save reports")
 
 
 if __name__ == "__main__":
