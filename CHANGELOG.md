@@ -2,7 +2,7 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
-## v1.4.0 — Security Round 4: PII Purge & Scope Confinement (2026-08-22)
+## v2.1.1 — Security Round 4: PII Purge & Scope Confinement (2026-08-22)
 
 ### Security
 - **PII purge**: Deleted all results/*.json (11 files), results/*.svg (9 files), hybrid-search/FULL_INDEX_REPORT.md, hybrid-search/test_results.json, hybrid-search/agent_memory.db, hybrid-search-proto/ (entire prototype folder), __pycache__/*.pyc — all contained real personal data (Stéphane, Airbus, .secrets/, stephanemee.com, AstroCapture)
