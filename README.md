@@ -1,7 +1,7 @@
 # 🧠 OpenClaw Memory Pipeline
 
 **Complete memory management pipeline for OpenClaw agents: extraction, archiving,
-scoring, consolidation, health monitoring, and ontology — all local-first.**
+scoring, consolidation, health monitoring, and hybrid search — all local-first.**
 
 Five standalone Python scripts that form a complete memory lifecycle pipeline for
 [OpenClaw](https://github.com/openclaw/openclaw) agents. No external API dependencies
@@ -119,6 +119,33 @@ python3 scripts/memory_health.py --fix        # Fix mode (DESTRUCTIVE)
 rewrites ontology file. Creates timestamped backup before modifying. Requires
 interactive confirmation or `--force` flag.
 
+### 6. `hybrid-search/hybrid_search.py` — Hybrid search engine
+
+FTS5 (BM25) + sqlite-vec (cosine similarity) + Reciprocal Rank Fusion (k=60).
+
+```bash
+python3 hybrid-search/hybrid_search.py init                    # Create index DB
+python3 hybrid-search/hybrid_search.py index                   # Batch index memory files
+python3 hybrid-search/hybrid_search.py add path/to/file.md     # Add single file
+python3 hybrid-search/hybrid_search.py search "project alpha"  # Hybrid search
+python3 hybrid-search/hybrid_search.py status                  # Index stats
+```
+
+**Scope:** Only indexes files within `WORKSPACE/memory/` + `MEMORY.md` + `TOOLS.md` + self `SKILL.md`.
+Personal files (`USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are excluded.
+No sibling skill enumeration (`skills/*/SKILL.md` glob removed).
+
+### 7. `hybrid-search/run_tests.py` — Search validation
+
+Runs anonymized test queries against the hybrid search index.
+
+```bash
+python3 hybrid-search/run_tests.py          # Run all test queries
+python3 hybrid-search/run_tests.py --verbose # Show scores and metadata
+```
+
+**Test fixtures use anonymized terms** (`project_alpha`, `sample_note_01`, etc.) — no real project names or personal data.
+
 ## Ontology
 
 JSONL-based entity and relation graph with YAML schema.
@@ -142,7 +169,7 @@ Environment variables with defaults:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKSPACE` | `~/.openclaw/workspace` | OpenClaw workspace path |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL (localhost only) |
 | `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
 | `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
 
@@ -172,7 +199,7 @@ python3 scripts/memory_health.py --deep
 
 1. **Local-first** — no external API, no paid dependencies
 2. **Composable** — each script is standalone, can run independently
-3. **Safe by default** — dry-run available for all analysis scripts; some nightly cron commands modify files by default (archive, scores, consolidation report). Review cron commands before deploying.
+3. **Safe by default** — dry-run available for all analysis scripts; `memory-health.py` is read-only by default. Some nightly cron commands modify files by default (archive, scores, consolidation report). Review cron commands before deploying.
 4. **Human-in-the-loop** — consolidation suggestions, not auto-merge
 5. **Pipeline-friendly** — scripts chain naturally, outputs feed inputs
 
@@ -186,20 +213,19 @@ MIT — free to use, modify, and share.
 
 ## Security Notes
 
-- ⚠️ **Nightly cron modifies files by default**: `auto_archive.py` moves files, `scoring.py` writes scores.json, `consolidate_advisor.py` writes consolidation_report.json. Review cron commands before deploying.
-- ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to archive/ and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.
-- ⚠️ **`--force` flag**: The `--force` flag exists on `consolidate_advisor.py` and `memory-health.py` for non-interactive/cron use. It skips confirmation prompts. Requires existing verified backup. Only use in trusted automation with backups in place.
-- ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag. Dry-run is the default when `--apply-promotions` is used without `--force`.
-- ⚠️ **OLLAMA_URL restricted to localhost**: LLM calls (trace extraction, cluster summaries, embeddings) send memory text to Ollama. URL is validated to be `localhost`, `127.0.0.1`, or `::1` only — no remote hosts allowed.
-- ⚠️ **PII sanitization before LLM calls**: Both `trace-extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` (regex-based removal of API keys, tokens, emails, passwords, PEM keys) before sending to any LLM. A console warning is printed before each LLM submission.
-- ⚠️ **Session transcripts are opt-in only**: `trace-extractor.py` no longer scans `~/.openclaw/agents/` globally. Use `--session-file <path>` to explicitly provide a single transcript file. Paths are confined to the workspace.
-- ⚠️ **`scores.json` stores hashes, not raw text**: `scoring.py` replaces note text with SHA256 hashes (first 16 chars) in all JSON output. File permissions set to `0o600` (owner-only read/write).
-- ⚠️ **`EXTRACTION_PROMPT` excludes secrets**: The LLM extraction prompt explicitly instructs the model to never extract credentials, API keys, tokens, passwords, personal data, or session IDs.
-- ⚠️ **Subprocess paths confined to workspace**: `subprocess.run` targets are validated with `Path.resolve()` + `is_relative_to(WORKSPACE)` before execution. No `os.environ` path injection possible.
-- ⚠️ **Memory files may contain sensitive data**: Review all files before indexing with hybrid search. The `scoring.py` script skips files matching secret patterns (`.secrets/`, `*.env`, `credentials*`, `*token*`, `*password*`, `.git/`).
-- ⚠️ **Hybrid search consent warnings**: `hybrid_search.py` `index` command displays a consent warning before batch embedding. Use `--yes` to skip in automation. `add` command prints a one-line embedding notice (use `--quiet` to suppress).
-- ⚠️ **`memory-health.py` is READ-ONLY by default**: No files or charts are written to disk without `--output-dir <path>`. SVG trend charts and JSON reports require this flag.
-- ⚠️ **Scope confinement**: All scripts restrict file scanning to the designated memory directory (`WORKSPACE/memory/`). No parent traversal (`../`) or sibling skill enumeration (`skills/*/SKILL.md`) is performed. Paths are validated with `Path.resolve().is_relative_to(WORKSPACE)`.
-- ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection possible. Script paths are validated against workspace confinement.
+- ⚠️ **`memory-health.py` is READ-ONLY by default**: No files, SVG charts, or JSON reports are written to disk without `--output-dir <path>`. `check_drift()` does not auto-create the results directory.
+- ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to `archive/` and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.
+- ⚠️ **`--force` flag**: Skips confirmation prompts on destructive operations. Only use in trusted automation with backups in place.
+- ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag.
+- ⚠️ **Nightly cron modifies files by default**: `auto_archive.py` moves files, `scoring.py` writes `scores.json`, `consolidate_advisor.py` writes `consolidation_report.json`. Review cron commands before deploying.
+- ⚠️ **OLLAMA_URL restricted to localhost**: LLM calls send memory text to Ollama. URL validated to be `localhost`, `127.0.0.1`, or `::1` only — no remote hosts.
+- ⚠️ **PII sanitization before LLM calls**: `trace-extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` (regex-based removal of API keys, tokens, emails, passwords, PEM keys) before any LLM submission.
+- ⚠️ **Session transcripts are opt-in only**: `trace-extractor.py` no longer scans `~/.openclaw/agents/` globally. Use `--session-file <path>` to explicitly provide a single transcript file.
+- ⚠️ **`scores.json` stores hashes, not raw text**: `scoring.py` replaces note text with SHA256 hashes (first 16 chars) in all JSON output. File permissions set to `0o600`.
+- ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection. Script paths validated with `Path.resolve().is_relative_to(WORKSPACE)`.
+- ⚠️ **Scope confinement**: All scripts restrict file scanning to `WORKSPACE/memory/`. No parent traversal (`../`) or sibling skill enumeration (`skills/*/SKILL.md`). Paths validated with `Path.resolve().is_relative_to(WORKSPACE)`.
+- ⚠️ **Personal files excluded from search index**: `hybrid_search.py` does not index `USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md` — only `MEMORY.md`, `TOOLS.md`, and self `SKILL.md` are indexed.
 - ⚠️ **No PII in test fixtures**: `run_tests.py` uses anonymized query terms (`project_alpha`, `sample_note_01`) — no real project names, personal names, or sensitive references.
-- ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to archive/ and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.
+- ⚠️ **Secret file filtering**: `scoring.py` skips files matching `.secrets/`, `*.env`, `credentials*`, `*token*`, `*password*`, `.git/`.
+- ⚠️ **Hybrid search consent warnings**: `hybrid_search.py index` displays a consent warning before batch embedding. Use `--yes` to skip in automation. `add` prints a one-line notice (use `--quiet` to suppress).
+- ⚠️ **`EXTRACTION_PROMPT` excludes secrets**: The LLM extraction prompt explicitly instructs the model to never extract credentials, API keys, tokens, passwords, personal data, or session IDs.
