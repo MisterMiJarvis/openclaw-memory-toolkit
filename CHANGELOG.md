@@ -2,6 +2,28 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v1.4.0 — Security Round 4: PII Purge & Scope Confinement (2026-08-22)
+
+### Security
+- **PII purge**: Deleted all results/*.json (11 files), results/*.svg (9 files), hybrid-search/FULL_INDEX_REPORT.md, hybrid-search/test_results.json, hybrid-search/agent_memory.db, hybrid-search-proto/ (entire prototype folder), __pycache__/*.pyc — all contained real personal data (Stéphane, Airbus, .secrets/, stephanemee.com, AstroCapture)
+- **`.gitignore` hardened**: Added `*.svg`, `eval_output/`, `*.log`, `*.pyc`, `hybrid-search-proto/`, `.secrets/`
+- **Subprocess query sanitized**: `memory-health.py` hardcoded query `"Stéphane's role at Airbus"` replaced with anonymized `"project alpha configuration"`
+- **Script path validation**: All `subprocess.run` script paths validated with `Path.resolve().is_relative_to(WORKSPACE)` — prevents path traversal
+- **Skill enumeration blocked**: `hybrid_search.py` no longer globs `skills/*/SKILL.md` — only indexes its own SKILL.md
+- **Personal files excluded from index**: `USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md` no longer indexed by hybrid_search.py
+- **Scope confinement**: `scoring.py`, `auto_archive.py`, `consolidate_advisor.py` validate `MEMORY_DIR.is_relative_to(WORKSPACE)` with explicit `ALLOWED_SCAN_DIR`
+
+### Changed
+- **`memory-health.py` is READ-ONLY by default**: No SVG charts, JSON reports, or benchmark reports written to disk without `--output-dir <path>` flag
+- **`check_drift()` no longer auto-creates `RESULTS_DIR`**: Only reads existing results if present
+- **Docstring updated**: Clearly documents read-only default, `--output-dir` for output, `--fix` as destructive mode
+- **`run_tests.py` TEST_QUERIES anonymized**: `AstroCapture` → `project_alpha`, `leadership coaching Airbus` → `team leadership coaching session`, `2026-08-17` → `sample_note_01`, etc.
+- **SKILL.md & README.md**: Updated with read-only documentation, security notes section, `--fix` destructive mode warning
+- **`consolidate_advisor.py` docstring**: Removed personal name reference
+
+### Files Modified (10)
+`.gitignore`, `README.md`, `SKILL.md`, `auto_archive.py`, `consolidate_advisor.py`, `hybrid-search/hybrid_search.py`, `hybrid-search/run_tests.py`, `memory-health.py`, `scoring.py`, deleted `hybrid-search/FULL_INDEX_REPORT.md`
+
 ## v1.3.0 — Security Round 3 (2026-08-18)
 
 ### Fixed
