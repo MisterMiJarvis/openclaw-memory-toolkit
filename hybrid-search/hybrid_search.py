@@ -67,7 +67,25 @@ WORKSPACE = os.environ.get("WORKSPACE", "/home/ubuntu/.openclaw/workspace")
 # Security: restrict memory scanning to the designated memory directory only.
 # Prevents path traversal (../) and skill enumeration (scanning skills/*).
 MEMORY_DIR = os.path.join(WORKSPACE, "memory")
-ALLOWED_SCAN_DIRS = {MEMORY_DIR}  # Only memory/ is scanned — no skills/, no parent traversal
+
+# Files indexed by collect_all_files() that legitimately live OUTSIDE memory/.
+# Declaring them here keeps this contract and the indexing routine in agreement
+# (an undeclared path used to be documented as "memory/ only" while still being
+# indexed — an intent/code divergence the scanner flags).
+ROOT_CONFIG_FILES = {
+    os.path.join(WORKSPACE, "MEMORY.md"),
+    os.path.join(WORKSPACE, "TOOLS.md"),
+}
+OWN_SKILL_FILE = os.path.join(WORKSPACE, "skills", "memory-health", "SKILL.md")
+
+# Directories whose contents may be scanned. memory/ only: no parent traversal,
+# no skills/* enumeration.
+ALLOWED_SCAN_DIRS = {MEMORY_DIR}
+
+# Exact files permitted outside those directories. Deliberately an allowlist of
+# named files, never a directory — adding a directory here would re-open skill
+# enumeration.
+ALLOWED_SCAN_FILES = ROOT_CONFIG_FILES | {OWN_SKILL_FILE}
 
 # One-time embedding warning flag
 _embedding_warning_shown = False
@@ -442,7 +460,8 @@ def safe_resolve(fpath: str) -> str:
 
     resolved = os.path.realpath(os.path.abspath(fpath))
     allowed_roots = tuple(os.path.realpath(d) + os.sep for d in ALLOWED_SCAN_DIRS)
-    if not resolved.startswith(allowed_roots):
+    allowed_files = {os.path.realpath(f) for f in ALLOWED_SCAN_FILES}
+    if not resolved.startswith(allowed_roots) and resolved not in allowed_files:
         raise UnsafeFileError(f"outside allowed scan dirs: {resolved}")
 
     for pattern in SECRET_PATH_PATTERNS:

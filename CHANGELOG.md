@@ -2,6 +2,32 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.1.3 — Security Round 6: Runtime Confinement & Read-Only Correctness (2026-09-27)
+
+Second pass over the public ClawHub audit, after the v2.1.2 import-path work.
+Four real findings closed; the rest of the report was confirmed as scanner false
+positives and is now documented so it does not have to be re-triaged.
+
+### Security
+- **`--workspace` no longer bypasses confinement** (`auto_archive.py`, `consolidate_advisor.py`): the `is_relative_to(WORKSPACE)` guard ran only at import time, while the CLI re-bound the module globals from `args.workspace` further down the flow — so `--workspace <other>` produced unvalidated `MEMORY_DIR` / `ARCHIVE_DIR` / `SCORES_FILE` for the whole run. The check is now a `validate_paths()` function invoked at import **and** immediately after every `--workspace` rebind. `WORKSPACE` is also `.resolve()`d before use. This was an intent/code divergence: the code claimed confinement, the flag removed it.
+- **Passive health check no longer mutates memory** (`memory-health.py`, T09): `run_trace_extraction()` ran `trace-extractor.py` unconditionally, and that script **appends to `memory/ontology/graph.jsonl` and rewrites daily notes** — so `memory-health.py` reported `MODE: READ-ONLY` while silently changing state. The extractor is now invoked with `--dry-run` unless the caller explicitly opted into mutation; the mutating path is reachable only through `_run_trace_extraction(..., mutating=True)`, set from the user's `--fix` intent.
+- **Scan scope now matches what is actually indexed** (`hybrid-search/hybrid_search.py`): `ALLOWED_SCAN_DIRS` declared "memory/ only", but `collect_all_files()` also indexed `MEMORY.md`, `TOOLS.md` and `skills/memory-health/SKILL.md`. Added `ALLOWED_SCAN_FILES`, an explicit allowlist of those exact paths, which `safe_resolve()` now accepts in addition to the scoped directories. Deliberately a set of named files, never a directory — a directory entry would re-open skill enumeration.
+- **Subprocess isolation hardened** (`memory-health.py`): `WORKSPACE` came straight from the environment and drove every subprocess path, and `["openclaw", ...]` calls trusted the inherited `$PATH`. `OPENCLAW_BIN` is now resolved once via `shutil.which()` with an absolute fallback (no bare `"openclaw"` remains), and `WORKSPACE` is validated against the expected root unless `WORKSPACE_ALLOW_CUSTOM=1` is set deliberately.
+
+### Verified
+- Syntax validated on all four modified modules.
+- `validate_paths()` exercised for real: an import-time load succeeds, then a simulated escape (`MEMORY_DIR=/etc` under the real workspace) raises `RuntimeError`; a legitimate workspace still archives normally in `--dry-run`.
+- Read-only path confirmed to build `trace-extractor.py --days N --dry-run`; `--help` on the extractor confirms the flag is supported.
+- Allowlist exercised: `MEMORY.md` and the skill's own `SKILL.md` accepted; `/etc/passwd`, `skills/<other>/SKILL.md`, `SOUL.md`, `USER.md`, `.secrets/*` and `memory/../SOUL.md` all refused.
+
+### Documented (scanner false positives — not defects)
+- **"Credential Access" in the secret-path filters**: `SECRET_PATH_PATTERNS` / `SECRET_SKIP_PATTERNS` match `\.ssh`, `id_rsa`, `token`, `password`, `.env`, `.aws`, `.config/google`. These are a deny-list that *prevents* such files from being read or indexed, matched against the resolved path so a benign-named symlink cannot smuggle a secret through. Defensive filter, not an access attempt.
+- **"Unsafe Defaults" in `CHANGELOG.md` / `README.md`**: `/tmp/vec-test-venv` and `/etc/passwd` appear only as documentation of already-removed vulnerabilities and of a guard's test case. Prose describing a fixed defect is not a live defect.
+- Full triage written up in `docs/SECURITY-AUDIT-NOTES.md`, including scanner-configuration recommendations.
+
+### Files Modified (5)
+`auto_archive.py`, `CHANGELOG.md`, `consolidate_advisor.py`, `hybrid-search/hybrid_search.py`, `memory-health.py`, added `docs/SECURITY-AUDIT-NOTES.md`
+
 ## v2.1.2 — Security Round 5: Import Path & Filesystem Confinement (2026-09-27)
 
 Follow-up to the public ClawHub security audit. Three real findings closed; the

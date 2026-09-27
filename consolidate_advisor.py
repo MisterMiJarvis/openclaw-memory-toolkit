@@ -59,9 +59,21 @@ MEMORY_FILE = WORKSPACE / "MEMORY.md"
 SCORES_FILE = MEMORY_DIR / "scores.json"
 CONSOLIDATION_REPORT = MEMORY_DIR / "consolidation_report.json"
 
-# Security: validate MEMORY_DIR is within WORKSPACE
-if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
-    raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
+# Security: validate derived paths are within WORKSPACE. Re-run after
+# --workspace rebinds the globals (import-time-only checking missed that).
+def validate_paths() -> None:
+    """Re-validate that all derived paths stay inside WORKSPACE."""
+    for label, path in (
+        ("MEMORY_DIR", MEMORY_DIR),
+        ("MEMORY_FILE", MEMORY_FILE),
+        ("SCORES_FILE", SCORES_FILE),
+        ("CONSOLIDATION_REPORT", CONSOLIDATION_REPORT),
+    ):
+        if not path.resolve().is_relative_to(WORKSPACE):
+            raise RuntimeError(f"Security: {label} escapes workspace: {path}")
+
+
+validate_paths()
 
 DAILY_NOTE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-.+)?\.md$")
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -556,11 +568,13 @@ def main():
 
     global WORKSPACE, MEMORY_DIR, MEMORY_FILE, SCORES_FILE, CONSOLIDATION_REPORT
     if args.workspace:
-        WORKSPACE = Path(args.workspace)
+        WORKSPACE = Path(args.workspace).resolve()
         MEMORY_DIR = WORKSPACE / "memory"
         MEMORY_FILE = WORKSPACE / "MEMORY.md"
         SCORES_FILE = MEMORY_DIR / "scores.json"
         CONSOLIDATION_REPORT = MEMORY_DIR / "consolidation_report.json"
+        # Re-run the confinement guard on the overridden values.
+        validate_paths()
 
     report = generate_consolidation_report(
         days_back=args.days,

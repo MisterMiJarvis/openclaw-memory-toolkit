@@ -24,9 +24,22 @@ WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"
 MEMORY_DIR = WORKSPACE / "memory"
 ARCHIVE_DIR = MEMORY_DIR / "archive"
 
-# Security: validate MEMORY_DIR is within WORKSPACE
-if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
-    raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
+
+def validate_paths() -> None:
+    """Re-validate that the memory/archive paths stay inside WORKSPACE.
+
+    Called after every reassignment of WORKSPACE/MEMORY_DIR/ARCHIVE_DIR — in
+    particular after --workspace is parsed. Checking only at import time left a
+    gap: --workspace re-bound the globals further down the flow without
+    re-running the guard (intent/code divergence).
+    """
+    if not MEMORY_DIR.resolve().is_relative_to(WORKSPACE):
+        raise RuntimeError(f"Security: MEMORY_DIR escapes workspace: {MEMORY_DIR}")
+    if not ARCHIVE_DIR.resolve().is_relative_to(WORKSPACE):
+        raise RuntimeError(f"Security: ARCHIVE_DIR escapes workspace: {ARCHIVE_DIR}")
+
+
+validate_paths()
 
 # Daily note pattern: YYYY-MM-DD optionally followed by -suffix
 DAILY_NOTE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-.+)?\.md$")
@@ -147,9 +160,12 @@ def main():
 
     global WORKSPACE, MEMORY_DIR, ARCHIVE_DIR
     if args.workspace:
-        WORKSPACE = Path(args.workspace)
+        WORKSPACE = Path(args.workspace).resolve()
         MEMORY_DIR = WORKSPACE / "memory"
         ARCHIVE_DIR = MEMORY_DIR / "archive"
+        # Re-run the confinement guard: the import-time check no longer covers
+        # the overridden values.
+        validate_paths()
 
     result = run_archive(args.days, dry_run=args.dry_run, verbose=args.verbose, force=args.force)
     sys.exit(0 if result["errors"] == 0 else 1)

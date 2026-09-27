@@ -45,6 +45,23 @@ for _path in [TRACE_EXTRACTOR, LOCOMO_TEST]:
     if not _path.resolve().is_relative_to(WORKSPACE):
         raise RuntimeError(f"Security: script path escapes workspace: {_path}")
 
+# Expected workspace root. WORKSPACE comes from the environment, so a hostile or
+# mistyped value would redirect every subprocess we launch. Allow an override
+# only when it is explicitly opted into, and always require the resolved value
+# to sit under the caller's home directory.
+EXPECTED_WORKSPACE = (Path.home() / ".openclaw" / "workspace").resolve()
+if os.environ.get("WORKSPACE_ALLOW_CUSTOM") != "1":
+    if WORKSPACE != EXPECTED_WORKSPACE and WORKSPACE != EXPECTED_WORKSPACE.parent and not WORKSPACE.is_relative_to(EXPECTED_WORKSPACE):
+        raise RuntimeError(
+            f"Security: WORKSPACE is not the expected {EXPECTED_WORKSPACE}: {WORKSPACE}\n"
+            "Set WORKSPACE_ALLOW_CUSTOM=1 to override deliberately."
+        )
+
+# Absolute path to the openclaw binary. Resolving it once, instead of trusting
+# the inherited $PATH on every call, stops a poisoned PATH entry from being
+# executed in place of the real CLI.
+OPENCLAW_BIN = shutil.which("openclaw") or "/usr/local/bin/openclaw"
+
 # Thresholds
 MEMORY_MAX_SIZE = 5000  # 5KB limit
 DAILY_NOTES_MAX_AGE = 14  # Archive notes older than 14 days
@@ -56,13 +73,26 @@ def run_trace_extraction(days=1, llm=False, sessions=False):
     ⚠️ Privacy note: When --llm or --sessions flags are used, session transcript
     text is sent to the local Ollama instance for processing. Ensure OLLAMA_URL
     stays on localhost for privacy.
+
+    ⚠️ State note: trace-extractor APPENDS to memory/ontology/graph.jsonl and
+    rewrites daily notes. It therefore runs with --dry-run unless the caller has
+    explicitly opted into a mutating run (``mutating=True``, set only by --fix).
+    A passive health check must never change memory state.
     """
+    return _run_trace_extraction(days=days, llm=llm, sessions=sessions, mutating=False)
+
+
+def _run_trace_extraction(days=1, llm=False, sessions=False, mutating=False):
+    """Internal runner. ``mutating`` mirrors the user's explicit --fix intent."""
     cmd = [sys.executable, str(TRACE_EXTRACTOR), "--days", str(days)]
     if llm:
         cmd.append("--llm")
     if sessions:
         cmd.append("--sessions")
-    
+    if not mutating:
+        # Read-only pass: preview extraction without writing ontology/notes.
+        cmd.append("--dry-run")
+
     try:
         # SECURITY: Local subprocess execution only. Outbound HTTP calls are isolated to the local Ollama API.
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(WORKSPACE))
@@ -207,7 +237,7 @@ def check_index():
     try:
         # SECURITY: Local subprocess execution only. Outbound HTTP calls are isolated to the local Ollama API.
         result = subprocess.run(
-            ["openclaw", "memory", "status"],
+            [OPENCLAW_BIN, "memory", "status"],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout + result.stderr
@@ -316,7 +346,7 @@ def check_memory_search():
     try:
         # SECURITY: Local subprocess execution only. Outbound HTTP calls are isolated to the local Ollama API.
         result = subprocess.run(
-            ["openclaw", "memory", "search", "project alpha configuration"],
+            [OPENCLAW_BIN, "memory", "search", "project alpha configuration"],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout + result.stderr
