@@ -85,7 +85,16 @@ ALLOWED_SCAN_DIRS = {MEMORY_DIR}
 # Exact files permitted outside those directories. Deliberately an allowlist of
 # named files, never a directory — adding a directory here would re-open skill
 # enumeration.
-ALLOWED_SCAN_FILES = ROOT_CONFIG_FILES | {OWN_SKILL_FILE}
+#
+# OPTIONAL root files are only declared when they actually exist on disk. An
+# unconditional entry would advertise a file collect_all_files() never indexes
+# (it guards each root file with os.path.exists), re-creating the same
+# intent/code divergence this allowlist exists to remove — in the opposite
+# direction. Declared must equal indexable: neither wider nor narrower.
+# TOOLS.md is optional: merged into AGENTS.md, absent on most workspaces.
+ALLOWED_SCAN_FILES = (
+    {f for f in ROOT_CONFIG_FILES if os.path.exists(f)} | {OWN_SKILL_FILE}
+)
 
 # One-time embedding warning flag
 _embedding_warning_shown = False

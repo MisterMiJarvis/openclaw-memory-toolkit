@@ -2,6 +2,24 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.1.4 — Allowlist/Index Agreement, Both Directions (2026-09-27)
+
+Follow-up found by the v2.1.3 control pass. v2.1.3 fixed an allowlist that was
+**narrower** than what was indexed; the fix then made it **wider** than disk
+reality. Declared scope must equal indexable scope in both directions.
+
+### Fixed
+- **Dead entry in `ALLOWED_SCAN_FILES`** (`hybrid-search/hybrid_search.py`): v2.1.3 declared `TOOLS.md` unconditionally, but `collect_all_files()` guards each root file with `os.path.exists()` — and `TOOLS.md` does not exist on a standard workspace (its content was merged into `AGENTS.md`). The allowlist therefore advertised a file that was never indexed: the same intent/code divergence v2.1.3 set out to remove, re-created in the opposite direction. Optional root files are now declared **only when present on disk** (`{f for f in ROOT_CONFIG_FILES if os.path.exists(f)}`), so `MEMORY.md` is always declared and `TOOLS.md` is declared exactly when it is actually indexable. `OWN_SKILL_FILE` stays unconditional (it is a shipped artifact).
+
+### Verified (executed, not read)
+- **`TOOLS.md` absent** (real workspace): dropped from the allowlist; `safe_resolve()` refuses the path with `UnsafeFileError: outside allowed scan dirs`.
+- **`TOOLS.md` present** (temp workspace, `WORKSPACE_ALLOW_CUSTOM=1`): automatically declared and resolved successfully.
+- **`MEMORY.md`** (present): still declared and resolved.
+- **Non-regression**: `/etc/passwd` still refused.
+
+### Files Modified (1)
+`hybrid-search/hybrid_search.py`
+
 ## v2.1.3 — Security Round 6: Runtime Confinement & Read-Only Correctness (2026-09-27)
 
 Second pass over the public ClawHub audit, after the v2.1.2 import-path work.
