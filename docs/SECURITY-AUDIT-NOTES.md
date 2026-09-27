@@ -113,6 +113,53 @@ Prose describing a fixed defect is not a live defect.
 **Disposition:** Inapplicable. Recommend excluding `*.md` from behavioural analysis,
 or restricting such rules to executable file types.
 
+### 2.3 "Tainted Flow / network sink" at `urlopen` in `consolidate_advisor.py`
+
+**File:** `consolidate_advisor.py` (line ~318), and the same shape in
+`hybrid-search/hybrid_search.py` (line ~137)
+**Scanner class:** Data Exfiltration / Tainted Flow to network sink
+
+The scanner traces user/memory-derived text into `urllib.request.urlopen` and
+flags it as leaving the machine. The endpoint, however, is not attacker-selectable.
+
+`OLLAMA_URL` is produced by `get_safe_ollama_url()` **at import time** (line 94):
+
+```python
+ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+def get_safe_ollama_url(env_var, default):
+    raw_url = os.environ.get(env_var, default)
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(...)
+    hostname = parsed.hostname or ""
+    if hostname not in ALLOWED_OLLAMA_HOSTS:
+        raise ValueError(f"Host '{hostname}' not allowed ...")
+    return raw_url
+
+OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
+```
+
+Any `OLLAMA_URL` that is not loopback raises `ValueError` at import — the process
+does not start. The destination of every `urlopen` call is therefore
+**`localhost` / `127.0.0.1` / `::1`, fixed before any memory content is read**, and
+the only variable part of the request is the prompt body, which the local model
+needs by definition. `hybrid_search.py` applies the identical guard to *both*
+`OLLAMA_URL` and `OLLAMA_EMBED_URL`.
+
+This is a deliberate design property: local inference must not leave the host.
+The `urlopen` call is a loopback sink, not an exfiltration sink.
+
+**Disposition:** False positive — **network flow secured by design (loopback-only)**.
+Recommend the scanner treat host values validated against a loopback allowlist as
+non-exfiltration sinks, or require the sink URL to be attacker-influenced for the
+rule to fire.
+
+**Residual hardening (not a defect, tracked):** the guard validates scheme and
+hostname but not port, and it is applied at import only. A future revision could
+pin the port and re-validate at call time; neither gap is reachable without the
+ability to set the process environment in the first place.
+
 ---
 
 ## 3. Standing recommendations for the scanner configuration
@@ -122,3 +169,5 @@ or restricting such rules to executable file types.
 2. Do not treat regex-literal strings inside deny-lists as credential access.
 3. Treat import-time-only validation as a distinct rule from runtime validation;
    several findings in this project were of that exact shape, and are now closed.
+4. Do not treat a URL validated against a loopback allowlist as a network
+   exfiltration sink — local inference endpoints are local by construction.

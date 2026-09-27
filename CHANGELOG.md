@@ -23,6 +23,7 @@ positives and is now documented so it does not have to be re-triaged.
 ### Documented (scanner false positives — not defects)
 - **"Credential Access" in the secret-path filters**: `SECRET_PATH_PATTERNS` / `SECRET_SKIP_PATTERNS` match `\.ssh`, `id_rsa`, `token`, `password`, `.env`, `.aws`, `.config/google`. These are a deny-list that *prevents* such files from being read or indexed, matched against the resolved path so a benign-named symlink cannot smuggle a secret through. Defensive filter, not an access attempt.
 - **"Unsafe Defaults" in `CHANGELOG.md` / `README.md`**: `/tmp/vec-test-venv` and `/etc/passwd` appear only as documentation of already-removed vulnerabilities and of a guard's test case. Prose describing a fixed defect is not a live defect.
+- **"Tainted Flow / network sink" at `urlopen`**: `consolidate_advisor.py` and `hybrid-search/hybrid_search.py` never POST memory content anywhere attacker-chosen. `OLLAMA_URL` (and `OLLAMA_EMBED_URL`) pass through `get_safe_ollama_url()`, which raises `ValueError` at import for any host outside `{localhost, 127.0.0.1, ::1}` — the process will not start against a remote endpoint. The destination is fixed to loopback before any memory is read, so this is a **local flow secured by design**, not exfiltration.
 - Full triage written up in `docs/SECURITY-AUDIT-NOTES.md`, including scanner-configuration recommendations.
 
 ### Files Modified (5)
