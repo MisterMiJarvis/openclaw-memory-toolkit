@@ -41,7 +41,7 @@ def find_archivable_notes(threshold_days: int):
         return candidates
 
     for entry in MEMORY_DIR.iterdir():
-        if not entry.is_file():
+        if entry.is_symlink() or not entry.is_file():
             continue
         match = DAILY_NOTE_RE.match(entry.name)
         if not match:

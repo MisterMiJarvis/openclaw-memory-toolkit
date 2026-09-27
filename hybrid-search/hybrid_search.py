@@ -28,11 +28,18 @@ import urllib.error
 import glob
 from urllib.parse import urlparse
 
-# Load sqlite-vec from the venv
-VEC_VENV_PATH = "/tmp/vec-test-venv/lib/python3.14/site-packages"
-sys.path.insert(0, VEC_VENV_PATH)
-
-import sqlite_vec
+# sqlite-vec must be installed in the active interpreter/environment:
+#     pip install sqlite-vec
+# Never add a world-writable directory (e.g. /tmp) to sys.path: anything able to
+# write there could shadow this module and get arbitrary code executed here.
+try:
+    import sqlite_vec
+except ImportError as exc:  # pragma: no cover - dependency guard
+    raise SystemExit(
+        "sqlite-vec is not installed for this interpreter.\n"
+        "Install it with:  pip install sqlite-vec\n"
+        f"(original error: {exc})"
+    ) from exc
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_memory.db")
@@ -398,13 +405,66 @@ class HybridMemoryStore:
 
 # ─── Indexing helpers ─────────────────────────────────────────────────────────
 
+# Secret/sensitive path patterns — applied to the RESOLVED path, never the
+# literal one, so a symlink with an innocuous name cannot smuggle a secret in.
+SECRET_PATH_PATTERNS = [
+    re.compile(r"\.secrets", re.IGNORECASE),
+    re.compile(r"\.env", re.IGNORECASE),
+    re.compile(r"credential", re.IGNORECASE),
+    re.compile(r"token", re.IGNORECASE),
+    re.compile(r"password", re.IGNORECASE),
+    re.compile(r"\.ssh", re.IGNORECASE),
+    re.compile(r"\.git/", re.IGNORECASE),
+    re.compile(r"\.git$", re.IGNORECASE),
+    re.compile(r"id_rsa|id_ed25519|\.pem$|\.key$", re.IGNORECASE),
+    re.compile(r"\.aws|\.config/google", re.IGNORECASE),
+]
+
+
+class UnsafeFileError(Exception):
+    """Raised when a file is refused by a safety guard."""
+
+
+def safe_resolve(fpath: str) -> str:
+    """Resolve and validate a file path before it is read or indexed.
+
+    Guards applied, in order:
+      1. symlinks are refused outright (they are the classic escape hatch);
+      2. the path is resolved with realpath() — a `..` segment is thereby
+         normalised away — and must stay inside ALLOWED_SCAN_DIRS;
+      3. the RESOLVED path is matched against the secret patterns, so a
+         benign-looking symlink name cannot bypass the filter.
+
+    Returns the resolved absolute path. Raises UnsafeFileError otherwise.
+    """
+    if os.path.islink(fpath):
+        raise UnsafeFileError(f"symlink refused: {fpath}")
+
+    resolved = os.path.realpath(os.path.abspath(fpath))
+    allowed_roots = tuple(os.path.realpath(d) + os.sep for d in ALLOWED_SCAN_DIRS)
+    if not resolved.startswith(allowed_roots):
+        raise UnsafeFileError(f"outside allowed scan dirs: {resolved}")
+
+    for pattern in SECRET_PATH_PATTERNS:
+        if pattern.search(resolved):
+            raise UnsafeFileError(f"sensitive path: {resolved}")
+
+    if not os.path.isfile(resolved):
+        raise UnsafeFileError(f"not a regular file: {resolved}")
+
+    return resolved
+
+
 def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
                source: str, base_score: float, delay: float = 0.1) -> tuple[int, int]:
     """Index a single file. Returns (chunks_indexed, errors)."""
-    if not os.path.exists(fpath):
+    try:
+        safe_path = safe_resolve(fpath)
+    except UnsafeFileError as e:
+        print(f"    [SKIP] {e}", flush=True)
         return (0, 1)
 
-    with open(fpath, 'r', encoding='utf-8') as f:
+    with open(safe_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     if not content.strip():
@@ -435,12 +495,15 @@ def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
 def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
                      source: str, base_score: float, delay: float = 0.1) -> tuple[int, int]:
     """Index a JSONL file where each line is a JSON object. Uses 'name' + 'type' as content."""
-    if not os.path.exists(fpath):
+    try:
+        safe_path = safe_resolve(fpath)
+    except UnsafeFileError as e:
+        print(f"    [SKIP] {e}", flush=True)
         return (0, 1)
 
     indexed = 0
     errors = 0
-    with open(fpath, 'r', encoding='utf-8') as f:
+    with open(safe_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -615,15 +678,28 @@ def cmd_index(args):
     store = HybridMemoryStore(DB_PATH, SCHEMA_PATH)
 
     if args.dir:
-        # Index a specific directory
+        # Index a specific directory — confined to ALLOWED_SCAN_DIRS.
+        scan_root = os.path.realpath(os.path.abspath(args.dir))
+        allowed_roots = tuple(os.path.realpath(d) + os.sep for d in ALLOWED_SCAN_DIRS)
+        if not scan_root.startswith(allowed_roots):
+            print(f"❌ --dir refused: {scan_root} is outside the allowed scan directories.")
+            print(f"   Allowed: {', '.join(sorted(ALLOWED_SCAN_DIRS))}")
+            store.close()
+            return
+
         files_to_index = []
         for ext in ["*.md", "*.jsonl"]:
-            files_to_index.extend(sorted(glob.glob(os.path.join(args.dir, "**", ext), recursive=True)))
+            files_to_index.extend(sorted(glob.glob(os.path.join(scan_root, "**", ext), recursive=True)))
         file_list = []
         for f in files_to_index:
-            rel = os.path.relpath(f, WORKSPACE)
+            try:
+                safe_path = safe_resolve(f)
+            except UnsafeFileError as e:
+                print(f"  [SKIP] {e}", flush=True)
+                continue
+            rel = os.path.relpath(safe_path, WORKSPACE)
             file_list.append({
-                "path": f,
+                "path": safe_path,
                 "category": args.category or "general",
                 "layer": args.layer or "episodic",
                 "source": rel,

@@ -105,15 +105,39 @@ SKIP_PATTERNS = re.compile(
 
 DAILY_NOTE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-.+)?\.md$")
 
-# Secret/sensitive file patterns to skip (never index or read these)
+# Secret/sensitive file patterns to skip (never index or read these).
+# Applied to the RESOLVED path (see safe_path below), not the literal one, so a
+# symlink with an innocuous name cannot smuggle a secret into the index.
 SECRET_SKIP_PATTERNS = [
-    re.compile(r"\.secrets/", re.IGNORECASE),
-    re.compile(r"\.env$", re.IGNORECASE),
-    re.compile(r"credentials", re.IGNORECASE),
+    re.compile(r"\.secrets", re.IGNORECASE),
+    re.compile(r"\.env", re.IGNORECASE),
+    re.compile(r"credential", re.IGNORECASE),
     re.compile(r"token", re.IGNORECASE),
     re.compile(r"password", re.IGNORECASE),
     re.compile(r"\.git/", re.IGNORECASE),
+    re.compile(r"\.git$", re.IGNORECASE),
+    re.compile(r"\.ssh", re.IGNORECASE),
+    re.compile(r"id_rsa|id_ed25519|\.pem$|\.key$", re.IGNORECASE),
+    re.compile(r"\.aws|\.config/google", re.IGNORECASE),
 ]
+
+
+def is_safe_memory_file(path: Path) -> bool:
+    """True only for a regular, non-symlink file whose RESOLVED path is innocuous.
+
+    A symlink named like a daily note is the classic way to pull ~/.ssh/id_rsa
+    into an index that then ships it to the embedding endpoint. Resolve first,
+    then match, then require a regular file.
+    """
+    if path.is_symlink():
+        print(f"  ⏭️  Skipping symlink: {path.name}", file=sys.stderr)
+        return False
+    resolved = os.path.realpath(str(path))
+    for pattern in SECRET_SKIP_PATTERNS:
+        if pattern.search(resolved):
+            print(f"  ⏭️  Skipping sensitive file: {path.name}", file=sys.stderr)
+            return False
+    return os.path.isfile(resolved)
 
 
 def detect_category(text: str) -> str:
@@ -168,12 +192,9 @@ def extract_memory_items_from_file(filepath: Path, file_date: datetime) -> list[
     """Extract individual memory items from a markdown file."""
     items = []
 
-    # Security guard: skip files in secret/sensitive directories
-    filepath_str = str(filepath)
-    for pattern in SECRET_SKIP_PATTERNS:
-        if pattern.search(filepath_str):
-            print(f"  ⏭️  Skipping sensitive file: {filepath.name}", file=sys.stderr)
-            return items
+    # Security guard: symlinks refused, sensitive/sensitive-resolved paths skipped
+    if not is_safe_memory_file(filepath):
+        return items
 
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
@@ -311,7 +332,7 @@ def run_scoring(verbose: bool = False, threshold: float = 0.0,
     # 1. Extract items from active daily notes
     if MEMORY_DIR.exists():
         for entry in sorted(MEMORY_DIR.iterdir()):
-            if not entry.is_file() or not DAILY_NOTE_RE.match(entry.name):
+            if entry.is_symlink() or not entry.is_file() or not DAILY_NOTE_RE.match(entry.name):
                 continue
             file_date = parse_date_from_filename(entry.name)
             if not file_date:

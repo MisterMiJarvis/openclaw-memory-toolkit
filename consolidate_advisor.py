@@ -106,7 +106,7 @@ def read_daily_notes(days_back: int) -> list[dict]:
         return notes
 
     for entry in sorted(MEMORY_DIR.iterdir()):
-        if not entry.is_file() or not DAILY_NOTE_RE.match(entry.name):
+        if entry.is_symlink() or not entry.is_file() or not DAILY_NOTE_RE.match(entry.name):
             continue
         match = DAILY_NOTE_RE.match(entry.name)
         if not match:
