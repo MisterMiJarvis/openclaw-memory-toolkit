@@ -213,6 +213,9 @@ MIT — free to use, modify, and share.
 
 ## Security Notes
 
+- 🔒 **v2.1.2 — no attacker-controllable import path**: `hybrid-search/hybrid_search.py` no longer inserts a `/tmp` directory at the head of `sys.path`. A world-writable directory in first position lets any local process shadow a module and get code executed on import. `sqlite_vec` is now imported from the active environment, with an actionable `ImportError` when it is missing (`pip install sqlite-vec`).
+- 🔒 **v2.1.2 — symlinks refused, resolved paths confined**: indexing and scanning validate paths through `safe_resolve()` / `is_safe_memory_file()`, which refuse symlinks outright, normalise the path with `realpath()` (so `..` cannot escape), confine it to the allowed scan directory, and match secret patterns against the **resolved** path — a symlink with an innocuous name cannot smuggle `~/.ssh/id_rsa` into the vector index. `--dir` arguments outside scope are rejected before any file is listed.
+- 🔒 **v2.1.2 — secret patterns extended**: added `.ssh`, `.aws`, `.config/google`, `id_rsa`, `id_ed25519`, `.pem`, `.key` to the skip list.
 - ⚠️ **`memory-health.py` is READ-ONLY by default**: No files, SVG charts, or JSON reports are written to disk without `--output-dir <path>`. `check_drift()` does not auto-create the results directory.
 - ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to `archive/` and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.
 - ⚠️ **`--force` flag**: Skips confirmation prompts on destructive operations. Only use in trusted automation with backups in place.

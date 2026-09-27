@@ -2,6 +2,27 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.1.2 — Security Round 5: Import Path & Filesystem Confinement (2026-09-27)
+
+Follow-up to the public ClawHub security audit. Three real findings closed; the
+remaining secondary-block items were confirmed as scanner false positives.
+
+### Security
+- **Attacker-controllable import path removed** (`hybrid-search/hybrid_search.py`): `VEC_VENV_PATH = "/tmp/vec-test-venv/lib/python3.14/site-packages"` + `sys.path.insert(0, ...)` deleted. A world-writable directory at the head of `sys.path` gives import resolution absolute priority over site-packages, so any local process could drop a `sqlite_vec.py` and have it executed on the next `import`. The path also did not exist on the production host — dead *and* dangerous. `sqlite_vec` now imports from the active environment, with an actionable `ImportError` (`pip install sqlite-vec`) and a comment recording why a `/tmp` entry must never return.
+- **`safe_resolve()` added to `hybrid_search.py`**: applied to `index_file()`, `index_jsonl_file()` and the `--dir` walk in `cmd_index()`. Guard order: refuse symlinks outright; `os.path.realpath()` to normalise `..`; require the result to sit inside `ALLOWED_SCAN_DIRS` (`memory/` only); match `SECRET_PATH_PATTERNS` against the **resolved** path (never the literal one, so a symlink cannot smuggle a secret through an innocuous name); require a regular file. `--dir` pointing outside scope is rejected before the glob runs. New `UnsafeFileError` exception.
+- **Symlinks refused in the memory scanners** (`scoring.py`, `auto_archive.py`, `consolidate_advisor.py`): `is_symlink()` checked before `is_file()` at each walk site. `scoring.py` gained `is_safe_memory_file()` — a symlink named like a daily note is the classic route for pulling a private key into an index that then ships it to the embedding endpoint.
+- **Secret patterns extended**: `.ssh`, `.aws`, `.config/google`, `id_rsa`, `id_ed25519`, `.pem`, `.key`.
+
+### Verified
+- Syntax validated on all five modules.
+- Guards exercised for real: a legitimate note is accepted; a symlink named `2026-01-01-innocent.md` pointing at `/etc/passwd` is refused; `/etc/passwd` passed directly is refused as out of scope; `api-token-notes.md` inside `memory/` is refused; `--dir /etc` is refused before listing.
+
+### Not Changed (by design)
+- `auto_archive.py` and `consolidate_advisor.py` still require `--force` in non-interactive mode. This is intended behaviour, not a defect — now documented rather than implicit.
+
+### Files Modified (6)
+`auto_archive.py`, `CHANGELOG.md`, `README.md`, `consolidate_advisor.py`, `hybrid-search/hybrid_search.py`, `scoring.py`
+
 ## v2.1.1 — Security Round 4: PII Purge & Scope Confinement (2026-08-22)
 
 ### Security
