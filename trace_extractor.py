@@ -29,11 +29,44 @@ PII_PATTERNS = [
     re.compile(r'sk-[A-Za-z0-9]{20,}'),                            # OpenAI-style keys
     re.compile(r'AIza[A-Za-z0-9_\\-]{35}'),                       # Google API keys
     re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}'), # emails
-    re.compile(r'(?:password|passwd|pwd|secret|token|api_key)\s*[:=]\s*\S+', re.IGNORECASE),
-    re.compile(r'Bearer\s+[A-Za-z0-9._-]+'),                       # Bearer tokens
+    re.compile(r'(?:password|passwd|pwd|secret|token|api_key|apikey|access_key)\s*[:=]\s*\S+', re.IGNORECASE),
+    re.compile(r'Bearer\s+[A-Za-z0-9._\-]+'),                     # Bearer tokens
     re.compile(r'xox[baprs]-[A-Za-z0-9-]+'),                        # Slack tokens
-    re.compile(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----'),  # PEM keys
+    re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),  # PEM keys
+    # Long opaque tokens (JWT, base64 secrets, hex keys) — the "uncommon format" gap.
+    re.compile(r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'),  # JWT
+    re.compile(r'\b[A-Fa-f0-9]{32,}\b'),                          # hex secrets (>=32)
+    re.compile(r'\b[A-Za-z0-9+/]{40,}={0,2}\b'),                  # base64 blobs (>=40)
+    re.compile(r'(?:\+33|0)[1-9](?:[\s.\-]?\d{2}){4}'),           # FR phone numbers
+    re.compile(r'\b(?:\d[ -]?){13,19}\b'),                        # card-like digit runs
 ]
+
+def sanitize_pii(text: str) -> str:
+    """Best-effort removal of API keys, tokens, emails, passwords, phone numbers
+    and long opaque blobs from text BEFORE any LLM submission.
+
+    SECURITY: this is a defence-in-depth filter, NOT a guarantee. Regex scrubbing
+    cannot catch every secret in an arbitrary format. The transport decision (local
+    vs cloud) is the primary control; see llm_destination() below.
+    """
+    for pattern in PII_PATTERNS:
+        text = pattern.sub('[REDACTED]', text)
+    return text
+
+
+def llm_destination() -> tuple[str, str]:
+    """Return (kind, label) describing where extraction text will be sent.
+
+    kind is 'cloud' or 'local'. Used to disclose the transport to the operator
+    before any session/memory content leaves the machine.
+    """
+    if os.environ.get("TRACE_LLM_LOCAL_ONLY", "").strip() in ("1", "true", "yes"):
+        return ("local", "local Ollama (127.0.0.1:11434)")
+    cloud_key = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if cloud_key:
+        return ("cloud", "Ollama cloud (ollama.com) — content leaves this machine")
+    # A key may also come from the secrets file / config; assume cloud-capable.
+    return ("cloud", "Ollama cloud (ollama.com) if a key is configured, else local fallback")
 
 def sanitize_pii(text: str) -> str:
     """Remove API keys, tokens, emails, and passwords from text before LLM submission."""
@@ -191,8 +224,13 @@ def save_extracted_date(day_str):
 def extract_with_llm(text, dry_run=False):
     """Use LLM (Ollama cloud primary, Ollama local fallback) to extract structured info.
 
-    SECURITY: Text is sanitized (PII/secrets removed) before sending to LLM.
-    DeepSeek API = cloud relay (data leaves the VPS). qwen2.5:7b local = fallback offline.
+    SECURITY / DISCLOSURE: memory and session content IS transmitted to an LLM.
+      - Primary transport is Ollama cloud (https://ollama.com) when an API key is
+        configured: content LEAVES this machine.
+      - Local fallback is Ollama at 127.0.0.1:11434: content stays on the machine.
+      - Set TRACE_LLM_LOCAL_ONLY=1 to force local-only and refuse cloud calls.
+    Text is sanitized (sanitize_pii) before submission, but regex scrubbing is
+    best-effort, NOT a guarantee. Do not feed raw secret material to this function.
     """
     import urllib.request
     import urllib.error
@@ -209,8 +247,12 @@ def extract_with_llm(text, dry_run=False):
 
     prompt = EXTRACTION_PROMPT + text
 
+    kind, label = llm_destination()
     if not dry_run:
-        print("   [Security] Sending sanitized excerpt to LLM (DeepSeek API)...")
+        if kind == "cloud":
+            print(f"   [Security] ⚠️  CLOUD TRANSMISSION: sending sanitized excerpt to {label}")
+        else:
+            print(f"   [Security] Sending sanitized excerpt to {label} (stays on this machine)")
 
     def parse_llm_output(output):
         """Extract JSON from LLM output, fixing common issues."""
@@ -268,7 +310,14 @@ def extract_with_llm(text, dry_run=False):
         return ""
 
     def call_ollama_cloud(attempt):
-        """Call Ollama cloud API (ollama.com). Returns raw content or None."""
+        """Call Ollama cloud API (ollama.com). Returns raw content or None.
+
+        REFUSES to run when TRACE_LLM_LOCAL_ONLY is set: the local-only mode must
+        not silently fall back to a transport that leaves the machine.
+        """
+        if os.environ.get("TRACE_LLM_LOCAL_ONLY", "").strip() in ("1", "true", "yes"):
+            print("   [Security] TRACE_LLM_LOCAL_ONLY=1 — cloud call refused (local-only mode)")
+            return None
         api_key = get_ollama_api_key()
         if not api_key:
             print("   ⚠️ No Ollama API key available")

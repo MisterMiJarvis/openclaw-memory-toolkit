@@ -2,6 +2,52 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.2.1 — Disclose the LLM Transport, Harden PII Scrubbing (2026-10-02)
+
+Closes the T09 finding raised by the ClawHub / SkillSpector scan on 2026-10-02:
+**"Undisclosed Cloud Transmission of Memory and Session Content"** in
+`trace_extractor.py`. The finding was valid. The extractor's primary transport is
+Ollama **cloud**, so memory and session text leaves the machine — and neither the
+code nor the docs said so, in a repository that advertises itself as local-first.
+
+### Fixed
+- **Undisclosed cloud transmission** (`trace_extractor.py`): the extraction path
+  posts to `https://ollama.com/api/chat` with a bearer key. Every run now prints its
+  destination before sending — `[Security] ⚠️ CLOUD TRANSMISSION: …` when the target
+  is cloud, `[Security] … (stays on this machine)` when it is local — via the new
+  `llm_destination()` helper.
+- **No local-only escape hatch**: added **`TRACE_LLM_LOCAL_ONLY=1`**, which makes
+  `call_ollama_cloud()` return early and refuses every cloud call. Local-only mode
+  cannot silently fail over to a transport that leaves the machine.
+- **`sanitize_pii()` gaps**: the filter was regex-only and missed secrets in uncommon
+  formats. Extended with JWTs (`eyJ…`), hex blobs ≥32 chars, base64 blobs ≥40 chars,
+  French phone numbers, card-like digit runs, `access_key`/`apikey` assignments and
+  OpenSSH private keys. The docstring now states plainly that scrubbing is
+  **best-effort, not a guarantee**, and that the transport decision is the primary
+  control. A "local-first, no cloud" claim is only as good as the transport behind it.
+
+### Docs
+- `README.md`, `SKILL.md`: the transmission, the destination, and the local-only
+  switch are now documented; the blanket "zero external cloud API" phrasing is
+  corrected where it did not hold for the extractor. `TRACE_LLM_LOCAL_ONLY` added to
+  the configuration table.
+- `docs/SECURITY-AUDIT-NOTES.md`: T09 recorded as a **closed real finding** (§1.0);
+  the two false-positive families it generated — tainted-flow at `urlopen` in
+  `trace_extractor.py` (§2.4) and credential-access hits on the secret deny-lists and
+  on the audit prose itself (§2.5) — are triaged with dispositions.
+
+### Verified (executed, not read)
+- `llm_destination()` returns `('local', …)` under `TRACE_LLM_LOCAL_ONLY=1`, and
+  `('cloud', "… content leaves this machine")` when `OLLAMA_API_KEY` is set.
+- `sanitize_pii()` redacts all six test classes: JWT, hex-32, base64-40, French phone
+  number, email, bearer token — 6/6.
+- Non-regression: ordinary note text survives (`version 2.1.4`, `exit code 1`
+  intact); only the embedded email is redacted.
+- `ast.parse()` clean on the modified module.
+
+### Acknowledgements
+T09 reported by the ClawHub security scan (SkillSpector). Fixed rather than argued.
+
 ## v2.2.0 — Trace Extractor Ships, Ontology GC, Deterministic IDs (2026-10-02)
 
 First release that includes `trace_extractor.py` as a **shipped artifact** rather

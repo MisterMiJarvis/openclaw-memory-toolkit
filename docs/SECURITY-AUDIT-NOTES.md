@@ -162,6 +162,40 @@ ability to set the process environment in the first place.
 
 ---
 
+### 2.4 "Tainted Flow / network sink" at `urlopen` in `trace_extractor.py`
+
+**File:** `trace_extractor.py` (reported lines ~291 and ~310)
+**Scanner class:** Data Exfiltration / Tainted Flow to network sink
+
+Same shape as 2.3, but this one is **not** a false positive in the same sense, and
+was fixed rather than triaged. The cloud path (`call_ollama_cloud`) posts to
+`https://ollama.com/api/chat` with `Authorization: Bearer <key>`; the key comes from
+the environment, hence the taint trace. This is a normal API client sending its own
+credential to its own endpoint — not exfiltration of another secret. The finding
+was nonetheless **acted on** in v2.2.1 (see 1.0): the transport is now disclosed,
+`TRACE_LLM_LOCAL_ONLY=1` refuses it, and the destination is printed before each send.
+
+**Disposition:** Behaviour **documented and operator-controlled** as of v2.2.1. The
+remaining `urlopen` in `call_ollama` targets the fixed literal
+`http://127.0.0.1:11434` — a loopback sink, false positive per 2.3.
+
+### 2.5 "Credential Access" in the secret deny-lists (extended)
+
+**Files:** `hybrid-search/hybrid_search.py` (~439), `scoring.py` (~113, ~128),
+`README.md`, `CHANGELOG.md`, `docs/SECURITY-AUDIT-NOTES.md`
+**Scanner class:** Privilege Escalation / Credential Access
+
+Superset of 2.1. The scanner matches the *detection patterns* for secrets
+(`re.compile(r"credential")`, `r"password"`, `r"token")` inside `SECRET_SKIP_PATTERNS`,
+and additionally flags the **prose** in `CHANGELOG.md` / `README.md` /
+`SECURITY-AUDIT-NOTES.md` that *documents* the protections. A deny-list that names
+what it refuses is evidence of a control, not a credential read.
+
+**Disposition:** Inapplicable. Recommend restricting credential-access rules to
+filesystem-read sinks, and never firing on `*.md` prose describing a fix.
+
+---
+
 ## 3. Standing recommendations for the scanner configuration
 
 1. Exclude markdown (`*.md`) from behavioural/taint analysis — documentation of a

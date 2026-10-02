@@ -194,6 +194,7 @@ Environment variables with defaults:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL (localhost only) |
 | `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
 | `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
+| `TRACE_LLM_LOCAL_ONLY` | _(unset)_ | Set to `1` to refuse cloud LLM calls and force local-only |
 
 ## Requirements
 
@@ -248,7 +249,8 @@ MIT — free to use, modify, and share.
 - ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag.
 - ⚠️ **Nightly cron modifies files by default**: `auto_archive.py` moves files, `scoring.py` writes `scores.json`, `consolidate_advisor.py` writes `consolidation_report.json`. Review cron commands before deploying.
 - ⚠️ **OLLAMA_URL restricted to localhost**: LLM calls send memory text to Ollama. URL validated to be `localhost`, `127.0.0.1`, or `::1` only — no remote hosts.
-- ⚠️ **PII sanitization before LLM calls**: `trace-extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` (regex-based removal of API keys, tokens, emails, passwords, PEM keys) before any LLM submission.
+- ⚠️ **Memory and session content IS transmitted to an LLM** (`trace_extractor.py`): extraction sends an excerpt of daily notes (and, with `--session-file`, session transcript text) to a language model. The **primary transport is Ollama cloud** (`https://ollama.com`) when an API key is configured — **content leaves this machine**. The local fallback is Ollama at `127.0.0.1:11434`, which keeps content on the machine. Set **`TRACE_LLM_LOCAL_ONLY=1`** to refuse every cloud call and force local-only operation. The destination is printed on each run (`[Security] ⚠️ CLOUD TRANSMISSION: …`).
+- ⚠️ **PII sanitization before LLM calls is best-effort, not a guarantee**: `trace_extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` — regex-based removal of API keys, tokens, JWTs, emails, passwords, PEM keys, French phone numbers and long opaque blobs — before any LLM submission. Regex scrubbing cannot catch every secret in an arbitrary format. **The transport decision is the primary control, not the filter.**
 - ⚠️ **Session transcripts are opt-in only**: `trace-extractor.py` no longer scans `~/.openclaw/agents/` globally. Use `--session-file <path>` to explicitly provide a single transcript file.
 - ⚠️ **`scores.json` stores hashes, not raw text**: `scoring.py` replaces note text with SHA256 hashes (first 16 chars) in all JSON output. File permissions set to `0o600`.
 - ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection. Script paths validated with `Path.resolve().is_relative_to(WORKSPACE)`.
