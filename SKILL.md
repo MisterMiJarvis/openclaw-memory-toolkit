@@ -35,7 +35,7 @@ python3 scripts/trace_extractor.py --days 1
 python3 scripts/trace_extractor.py --days 3 --llm
 
 # With session transcripts
-python3 scripts/trace_extractor.py --days 1 --llm --sessions
+python3 scripts/trace_extractor.py --days 1 --llm --session-file /path/to/session.jsonl
 
 # Preview only
 python3 scripts/trace_extractor.py --days 1 --llm --dry-run
@@ -126,7 +126,24 @@ python3 scripts/memory_health.py --fix        # Fix mode (DESTRUCTIVE)
 rewrites ontology file (dedup + clean). Creates timestamped backup in `memory/backup/`
 before modifying. Requires interactive confirmation or `--force` flag.
 
-### 6. `hybrid_search.py` — Hybrid search (FTS5 + sqlite-vec + RRF)
+### 6. `ontology_compact.py` — Ontology graph GC
+
+Compacts `memory/ontology/graph.jsonl` (an append-only operation log) by replaying
+it into a consolidated state: one line per active entity, superseded records dropped.
+
+**Safe by design**: backs up first (MD5-verified), writes to a temp file, validates
+that the entity set and contents are identical, and only then swaps in place.
+Idempotent: skips when the gain is below `--min-gain` (default 5%).
+
+```bash
+python3 scripts/ontology_compact.py --dry-run      # Report only
+python3 scripts/ontology_compact.py                # Compact (threshold 5%)
+python3 scripts/ontology_compact.py --min-gain 10  # Skip unless >=10% smaller
+```
+
+Run weekly. Typical gain on a never-compacted log: **~60-65%**.
+
+### 7. `hybrid_search.py` — Hybrid search (FTS5 + sqlite-vec + RRF)
 
 Hybrid memory search combining lexical (BM25 via SQLite FTS5) and semantic
 (vector via sqlite-vec) retrieval using Reciprocal Rank Fusion (RRF, k=60).

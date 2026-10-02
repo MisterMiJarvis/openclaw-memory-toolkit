@@ -2,6 +2,63 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.2.0 — Trace Extractor Ships, Ontology GC, Deterministic IDs (2026-10-02)
+
+First release that includes `trace_extractor.py` as a **shipped artifact** rather
+than a referenced-but-absent step, plus a long-overdue garbage collector for the
+ontology op-log. Two latent bugs in the extractor are fixed: IDs that were
+never stable across processes, and an "upsert" that physically appended.
+
+### Added
+- **`trace_extractor.py`** — the session/notes extractor is now published. It was
+  cited as step 1 of the documented pipeline since v2.0 but the file itself was
+  never in the repository, so cloning the toolkit gave you a README referencing a
+  script no one could run. Categories: decisions, errors, facts, patterns.
+- **`ontology_compact.py`** — garbage collector for `memory/ontology/graph.jsonl`.
+  The ontology file is an append-only operation log; nothing ever replayed it, so
+  the same entity was rewritten on every run and the file grew without bound.
+  The compactor replays the log into a consolidated state (one line per active
+  entity, superseded records dropped), backs up first, validates that the entity
+  set and contents are identical, and only then swaps in place. Idempotent: it
+  skips when the gain is below `--min-gain` (default 5%).
+
+### Fixed
+- **Non-deterministic entity IDs** (`trace_extractor.py`): decisions were keyed
+  with `hash(what) % 10000`. Python randomises `hash()` per process
+  (`PYTHONHASHSEED`), so the *same* decision produced a *different* ID on every
+  run. The `if entity_id not in existing_ids` guard could never fire — the ID was
+  always new — and the guard's own premise (ID identifies content) was false.
+  Observed impact on a production workspace: one episode rewritten **38 times**
+  under 38 different IDs, 63 IDs duplicated 2–38×, 52% of all log lines redundant.
+  IDs now come from `stable_id()`, a SHA-256 prefix, stable across processes and
+  machines.
+- **`upsert` that appended** (`trace_extractor.py`): records were labelled
+  `"op": "upsert"` but written with `open(path, "a")`. The operation name
+  described an intent the code did not implement — an update was impossible, only
+  appends happened. Both writers now go through `upsert_entities()`, which reads
+  the current file, replaces matching entities in place, appends the rest, and
+  writes atomically via a temp file.
+
+### Verified (executed, not read)
+- **ID stability**: `stable_id()` called from three separate interpreter processes
+  returns the identical digest (`dec_20260629_4f0644cd`, `tl_20260613_873a194b`),
+  where the previous `hash()`-based scheme returned a different value each run.
+- **Real upsert**: on a two-entity file, updating an existing ID leaves the line
+  count unchanged and replaces the record; adding a new ID grows it by exactly one.
+- **Compactor on a production graph**: 742,364 → 272,518 bytes (−63%),
+  2,018 → 912 lines, 1,106 redundant lines dropped, and the reloaded entity set
+  compared equal to the pre-compaction state (912 active entities, 0 lost).
+- **Compactor idempotence**: re-run on the already-compacted file reports 0 lines
+  dropped and writes nothing (gain below threshold).
+- **Syntax**: `ast.parse()` clean on both new scripts.
+
+### Notes
+- The ontology compactor pairs with the parser fix in the sibling release line:
+  `memory_health.py` and the index builder accept any record carrying an entity,
+  so a consolidated `"op": "state"` file and a raw operation log both index
+  correctly. Previously the indexer matched `op == "create"` only, which silently
+  indexed **zero** entities once a log had been compacted.
+
 ## v2.1.4 — Allowlist/Index Agreement, Both Directions (2026-09-27)
 
 Follow-up found by the v2.1.3 control pass. v2.1.3 fixed an allowlist that was

@@ -3,7 +3,7 @@
 **Complete memory management pipeline for OpenClaw agents: extraction, archiving,
 scoring, consolidation, health monitoring, and hybrid search — all local-first.**
 
-Five standalone Python scripts that form a complete memory lifecycle pipeline for
+Seven standalone Python scripts that form a complete memory lifecycle pipeline for
 [OpenClaw](https://github.com/openclaw/openclaw) agents. No external API dependencies
 (Ollama runs locally via HTTP, no cloud APIs)
 — works with any local LLM (Ollama, LM Studio, etc.) or fully without LLM in fallback mode.
@@ -19,7 +19,8 @@ Nightly Cron (23h)
   ├─ 2. auto_archive.py        # Archive daily notes >21 days
   ├─ 3. scoring.py             # Score all memories with temporal decay
   ├─ 4. consolidate_advisor.py # Suggest consolidations (agent reviews)
-  └─ 5. memory_health.py       # Periodic health check (weekly)
+  ├─ 5. memory_health.py       # Periodic health check (weekly)
+  └─ 6. ontology_compact.py    # GC the ontology op-log (weekly)
 ```
 
 All scripts are standalone and composable. Run individually or as a pipeline.
@@ -119,7 +120,28 @@ python3 scripts/memory_health.py --fix        # Fix mode (DESTRUCTIVE)
 rewrites ontology file. Creates timestamped backup before modifying. Requires
 interactive confirmation or `--force` flag.
 
-### 6. `hybrid-search/hybrid_search.py` — Hybrid search engine
+### 6. `ontology_compact.py` — Ontology graph GC
+
+Compacts `memory/ontology/graph.jsonl` (an append-only operation log) by replaying
+it into a consolidated state: one line per active entity, superseded records dropped.
+
+**Safe by design**: backs up first (MD5-verified), writes to a temp file, validates
+that the entity set and contents are identical, and only then swaps in place. Skips
+entirely when the gain is below a threshold, so it is idempotent.
+
+```bash
+python3 scripts/ontology_compact.py --dry-run      # Report only
+python3 scripts/ontology_compact.py                # Compact (default threshold 5%)
+python3 scripts/ontology_compact.py --min-gain 10  # Skip unless >=10% smaller
+```
+
+**Output:** rewrites `memory/ontology/graph.jsonl` + a timestamped backup in
+`memory/ontology/backups/`.
+
+Typical gain on an op-log that has never been compacted: **~60-65%**.
+Run it weekly; between runs the file only grows by genuinely new operations.
+
+### 7. `hybrid-search/hybrid_search.py` — Hybrid search engine
 
 FTS5 (BM25) + sqlite-vec (cosine similarity) + Reciprocal Rank Fusion (k=60).
 
@@ -135,7 +157,7 @@ python3 hybrid-search/hybrid_search.py status                  # Index stats
 Personal files (`USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are excluded.
 No sibling skill enumeration (`skills/*/SKILL.md` glob removed).
 
-### 7. `hybrid-search/run_tests.py` — Search validation
+### 8. `hybrid-search/run_tests.py` — Search validation
 
 Runs anonymized test queries against the hybrid search index.
 
@@ -190,6 +212,7 @@ python3 scripts/consolidate_advisor.py --no-llm
 
 # Weekly health check (Monday):
 python3 scripts/memory_health.py --quick
+python3 scripts/ontology_compact.py
 
 # Monthly deep check (manual):
 python3 scripts/memory_health.py --deep
