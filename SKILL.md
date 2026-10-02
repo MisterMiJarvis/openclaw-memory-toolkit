@@ -1,8 +1,13 @@
 # Memory Pipeline Skill
 
 Complete memory management pipeline for OpenClaw agents: extraction, archiving,
-scoring, consolidation, health monitoring, and ontology — all local-first,
-zero external cloud API dependencies (Ollama runs locally via HTTP).
+scoring, consolidation, health monitoring, and ontology — local by default
+(Ollama runs locally via HTTP).
+
+⚠️ **One opt-in exception**: `trace_extractor.py` can send memory/session excerpts
+to **Ollama cloud** (`https://ollama.com`) when `OLLAMA_API_KEY` is configured.
+With no key it stays local; `TRACE_LLM_LOCAL_ONLY=1` refuses every cloud call. The
+destination is printed before each send. See the Security Notes below.
 
 ## Pipeline Overview
 
@@ -291,7 +296,7 @@ python3 scripts/memory_health.py --deep
 
 ## Design Principles
 
-1. **Local-first** — no external API, no paid dependencies
+1. **Local by default** — no cloud account, no paid dependency. `trace_extractor.py` is the only cloud-capable script, opt-in via `OLLAMA_API_KEY`, disclosed each run, cancellable via `TRACE_LLM_LOCAL_ONLY=1`
 2. **Composable** — each script is standalone, can run independently
 3. **Safe by default** — dry-run available for all analysis scripts; some nightly cron commands modify files by default (archive, scores, consolidation report). Review cron commands before deploying.
 4. **Human-in-the-loop** — consolidation suggestions, not auto-merge
@@ -316,7 +321,8 @@ MIT — free to use, modify, and share.
 - ⚠️ **Memory files may contain sensitive data**: Review all files before indexing with hybrid search. The `scoring.py` script skips files matching secret patterns (`.secrets/`, `*.env`, `credentials*`, `*token*`, `*password*`, `.git/`).
 - ⚠️ **Hybrid search consent warnings**: `hybrid_search.py` `index` command displays a consent warning before batch embedding. Use `--yes` to skip in automation. `add` command prints a one-line embedding notice (use `--quiet` to suppress).
 - ⚠️ **`memory-health.py` is READ-ONLY by default**: No files or charts are written to disk without `--output-dir <path>`. SVG trend charts and JSON reports require this flag.
-- ⚠️ **Scope confinement**: All scripts restrict file scanning to the designated memory directory (`WORKSPACE/memory/`). No parent traversal (`../`) or sibling skill enumeration (`skills/*/SKILL.md`) is performed. Paths are validated with `Path.resolve().is_relative_to(WORKSPACE)`.
+- ⚠️ **Scope confinement**: All scripts restrict file scanning to the designated memory directory (`WORKSPACE/memory/`), plus an explicit allowlist of three root config files that the indexer legitimately reads (`MEMORY.md`, `TOOLS.md`, the skill's own `SKILL.md`). No parent traversal (`../`) and no sibling skill enumeration (`skills/*/SKILL.md`). Paths are validated with `Path.resolve().is_relative_to(WORKSPACE)`.
+- ⚠️ **`--session-file` is a deliberate, explicit exception**: `trace_extractor.py --session-file <path>` accepts one absolute path outside the workspace, because a session transcript does not live under `memory/`. It is never scanned automatically — no global session directory walk exists. Only pass paths you own and accept sending to the configured LLM transport.
 - ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection possible. Script paths are validated against workspace confinement.
 - ⚠️ **No PII in test fixtures**: `run_tests.py` uses anonymized query terms (`project_alpha`, `sample_note_01`) — no real project names, personal names, or sensitive references.
 - ⚠️ **`--fix` mode is destructive**: `memory-health.py --fix` moves daily notes to archive/ and rewrites ontology. Requires interactive confirmation or `--force` flag. Creates timestamped backups in `memory/backup/` before modifying.

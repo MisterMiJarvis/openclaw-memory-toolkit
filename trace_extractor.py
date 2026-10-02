@@ -54,25 +54,63 @@ def sanitize_pii(text: str) -> str:
     return text
 
 
+def _find_ollama_api_key_sources() -> tuple[str, str]:
+    """Return (source, key) for the first Ollama API key found.
+
+    Mirrors the lookup order of get_ollama_api_key() so the transport disclosure
+    cannot disagree with the transport actually used. Source is a short label:
+    'env', 'secrets-file', 'config' or '' when no key is available.
+    """
+    key = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if key:
+        return ("env", key)
+    for secrets_candidate in (
+        Path.home() / ".openclaw" / "workspace" / ".secrets" / "ollama.json",
+        Path.home() / ".openclaw" / ".secrets" / "ollama.json",
+    ):
+        try:
+            if secrets_candidate.exists():
+                d = json.loads(secrets_candidate.read_text())
+                v = d.get("apiKey") or d.get("key") or ""
+                if isinstance(v, str) and v.strip():
+                    return ("secrets-file", v.strip())
+        except Exception:
+            continue
+    try:
+        cfg_path = Path(os.environ.get("OPENCLAW_CONFIG", Path.home() / ".openclaw" / "openclaw.json"))
+        cfg = json.loads(cfg_path.read_text())
+        ak = (cfg.get("models", {}).get("providers", {}).get("ollama", {}) or {}).get("apiKey", "")
+        if isinstance(ak, str) and ak.strip():
+            return ("config", ak.strip())
+        if isinstance(ak, dict):
+            sid = ak.get("id") or ak.get("name") or ""
+            ref = os.environ.get(sid, "").strip()
+            if ref:
+                return ("config-store", ref)
+    except Exception:
+        pass
+    return ("", "")
+
+
 def llm_destination() -> tuple[str, str]:
     """Return (kind, label) describing where extraction text will be sent.
 
     kind is 'cloud' or 'local'. Used to disclose the transport to the operator
     before any session/memory content leaves the machine.
+
+    SECURITY: this MUST stay in sync with get_ollama_api_key() and the actual
+    call path in extract_with_llm(). An earlier version only checked the
+    OLLAMA_API_KEY environment variable, so a key sourced from the secrets file
+    or openclaw.json made the banner claim "local fallback" while the content
+    was in fact posted to ollama.com. The lookup order is now shared.
     """
     if os.environ.get("TRACE_LLM_LOCAL_ONLY", "").strip() in ("1", "true", "yes"):
-        return ("local", "local Ollama (127.0.0.1:11434)")
-    cloud_key = os.environ.get("OLLAMA_API_KEY", "").strip()
-    if cloud_key:
-        return ("cloud", "Ollama cloud (ollama.com) — content leaves this machine")
-    # A key may also come from the secrets file / config; assume cloud-capable.
-    return ("cloud", "Ollama cloud (ollama.com) if a key is configured, else local fallback")
-
-def sanitize_pii(text: str) -> str:
-    """Remove API keys, tokens, emails, and passwords from text before LLM submission."""
-    for pattern in PII_PATTERNS:
-        text = pattern.sub('[REDACTED]', text)
-    return text
+        return ("local", "local Ollama (127.0.0.1:11434) — forced by TRACE_LLM_LOCAL_ONLY")
+    source, _key = _find_ollama_api_key_sources()
+    if source:
+        return ("cloud", f"Ollama cloud (ollama.com) — key from {source} — content leaves this machine")
+    # No key anywhere: the cloud call is skipped and the local fallback is used.
+    return ("local", "local Ollama (127.0.0.1:11434) — no API key configured")
 
 
 def stable_id(prefix: str, text: str, date_str: str) -> str:
@@ -277,37 +315,11 @@ def extract_with_llm(text, dry_run=False):
         2. dedicated secrets file ~/.openclaw/workspace/.secrets/ollama.json
         3. openclaw.json provider config (resolving store references if possible)
         If no plaintext key is found, returns empty string (caller will report it).
+
+        SECURITY: keep the lookup order identical to _find_ollama_api_key_sources()
+        so the disclosure in llm_destination() matches the transport actually used.
         """
-        key = os.environ.get("OLLAMA_API_KEY", "").strip()
-        if key:
-            return key
-        # 2. dedicated secrets file (gitignored, 0600)
-        for secrets_candidate in (
-            Path.home() / ".openclaw" / "workspace" / ".secrets" / "ollama.json",
-            Path.home() / ".openclaw" / ".secrets" / "ollama.json",
-        ):
-            try:
-                if secrets_candidate.exists():
-                    d = json.loads(secrets_candidate.read_text())
-                    v = d.get("apiKey") or d.get("key") or ""
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
-            except Exception:
-                continue
-        # 3. openclaw.json provider config (plaintext string or store-ref dict)
-        try:
-            cfg_path = Path(os.environ.get("OPENCLAW_CONFIG", Path.home() / ".openclaw" / "openclaw.json"))
-            cfg = json.loads(cfg_path.read_text())
-            ak = (cfg.get("models", {}).get("providers", {}).get("ollama", {}) or {}).get("apiKey", "")
-            if isinstance(ak, str) and ak.strip():
-                return ak.strip()
-            if isinstance(ak, dict):
-                # store reference like {"source":"store","provider":"default","id":"OLLAMA_API_KEY"}
-                sid = ak.get("id") or ak.get("name") or ""
-                return os.environ.get(sid, "").strip()
-        except Exception:
-            pass
-        return ""
+        return _find_ollama_api_key_sources()[1]
 
     def call_ollama_cloud(attempt):
         """Call Ollama cloud API (ollama.com). Returns raw content or None.

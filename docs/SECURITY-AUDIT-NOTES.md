@@ -194,6 +194,46 @@ what it refuses is evidence of a control, not a credential read.
 **Disposition:** Inapplicable. Recommend restricting credential-access rules to
 filesystem-read sinks, and never firing on `*.md` prose describing a fix.
 
+### 2.6 Round 7 (scan of published v2.2.1, 2026-10-02) — 54 findings triaged
+
+Report: 54 findings across the published v2.2.1. **One was real** (see §1.5 below);
+the remainder are the same four false-positive families, restated at higher volume
+because the scan covered the docs as well as the code.
+
+| Scanner claim | Where | Disposition |
+|---|---|---|
+| Tainted flow `os.environ` → `urlopen` | `consolidate_advisor.py` ~318 | **False positive.** Sink is `OLLAMA_URL`, produced by `get_safe_ollama_url()`; any non-loopback host raises `ValueError` at import. Per §2.3. |
+| Tainted flow `os.environ` → `urlopen` | `trace_extractor.py` ~353 | **Real, fixed in v2.2.1.** The cloud call. Documented, operator-controlled, cancellable. Per §2.4. |
+| Tainted flow `os.environ` → `urlopen` | `trace_extractor.py` ~359 | **False positive.** `call_ollama()` targets the fixed literal `http://127.0.0.1:11434/api/chat`. |
+| Credential Access (×12) | `SECRET_SKIP_PATTERNS`, `README.md`, `CHANGELOG.md`, this file, `scoring.py`, `hybrid_search.py` | **False positive.** Deny-list literals, plus prose *documenting* the controls. Per §2.1 / §2.5. |
+| Intent-Code Divergence (×6) | `README.md` 7-9, 194-197; `SKILL.md` 315, 319; `CHANGELOG.md` 9-18, 132-134 | **Valid observation, closed in v2.2.2.** The "local-first / no external API" claim did contradict the cloud transport. Wording corrected. |
+| Session Persistence (cron) | `README.md` ~246 | **False positive.** Prose describing the documented nightly cron, not the skill installing one. The skill ships no installer. |
+| Autonomous Decision Making (×2) | `auto_archive.py` ~128, `consolidate_advisor.py` ~534 | **False positive.** The quoted `if not sys.stdin.isatty(): return` *is* the human-in-the-loop guard. |
+
+### 1.5 Round 7 — the one real finding: disclosure that contradicted itself
+
+**File:** `trace_extractor.py`
+**Scanner class:** none — the scanner reported the *cloud send* (§2.4); this was found
+while fixing it.
+
+`llm_destination()`, whose only job is to tell the operator where memory content is
+about to go, read the key from `os.environ["OLLAMA_API_KEY"]` alone. The sender,
+`get_ollama_api_key()`, also resolves the key from `.secrets/ollama.json` and
+`openclaw.json`. With the key in the secrets file — the common deployment — the
+banner announced a *local fallback* and the content then went to `ollama.com`.
+
+The warning was therefore wrong in precisely the configuration it was written to
+cover, and a reader who checked the banner would draw the wrong conclusion with
+confidence. That is worse than no disclosure.
+
+**Fix (v2.2.2):** both paths share `_find_ollama_api_key_sources()`, one precedence
+order, returning `(source, key)`. The banner names the source; `TRACE_LLM_LOCAL_ONLY=1`
+short-circuits before any lookup.
+
+**Verified:** with a key only in `.secrets/ollama.json`, the function now returns
+`('cloud', '… key from secrets-file …')`; with `TRACE_LLM_LOCAL_ONLY=1`,
+`('local', '… forced by TRACE_LLM_LOCAL_ONLY')`.
+
 ---
 
 ## 3. Standing recommendations for the scanner configuration
@@ -205,3 +245,8 @@ filesystem-read sinks, and never firing on `*.md` prose describing a fix.
    several findings in this project were of that exact shape, and are now closed.
 4. Do not treat a URL validated against a loopback allowlist as a network
    exfiltration sink — local inference endpoints are local by construction.
+5. A disclosure that names the wrong destination is itself a defect. If the code
+   prints where data goes, trace the printed value to the same source the sender
+   uses; a banner is only a control if it cannot disagree with the transport.
+6. Session-persistence rules should require an *installer* (cron writer, systemd
+   unit, shell-rc append) — prose that documents a cron table is not persistence.

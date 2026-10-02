@@ -2,6 +2,73 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.2.2 — Disclosure That Matches the Transport (2026-10-02)
+
+Round 7, from the second SkillSpector run on the published v2.2.1 (54 findings).
+Most of the report is scanner triage already covered in
+`docs/SECURITY-AUDIT-NOTES.md`; **one finding was real, and it was one the scanner
+only half-saw**.
+
+### Fixed
+- **The transport disclosure lied about the transport** (`trace_extractor.py`):
+  `llm_destination()` — the function whose entire job is to warn the operator before
+  memory content leaves the machine — read **only** `os.environ["OLLAMA_API_KEY"]`,
+  while the actual sender, `get_ollama_api_key()`, also resolves the key from
+  `~/.openclaw/workspace/.secrets/ollama.json` and from `openclaw.json`.
+  Consequence: with the key in the secrets file — the common deployment — the banner
+  printed *"local Ollama … else local fallback"* and the content was then posted to
+  `https://ollama.com`. The warning was wrong **in exactly the configuration it
+  existed to protect**. This is worse than an undisclosed transmission: it is a
+  disclosure that actively misleads.
+  Both code paths now share one resolver, `_find_ollama_api_key_sources()`, which
+  returns `(source, key)` in one fixed precedence order. The banner names the source
+  (`key from env`, `key from secrets-file`, `key from config`) and `TRACE_LLM_LOCAL_ONLY=1`
+  short-circuits before any lookup.
+- **Intent/code divergence in the docs** (`README.md`, `SKILL.md`): the README opened
+  with "No external API dependencies (Ollama runs locally via HTTP, no cloud APIs)"
+  and the SKILL description ended with "zero external cloud API dependencies" — while
+  the extractor's **primary** transport was Ollama cloud. Six of the 54 findings are
+  this single contradiction. Both files now state the real posture: **local by
+  default, one opt-in cloud path**, with the switch and the warning documented at the
+  top, not buried.
+- **`--session-file` contradicted the confinement claim** (`SKILL.md`): the notes
+  asserted that every script stays inside `WORKSPACE/memory/`, but `--session-file`
+  deliberately accepts one absolute path outside it (a session transcript does not
+  live under `memory/`). The claim is now precise — documented as an explicit,
+  never-automatic exception rather than silently overstated. The same edit records the
+  three-file `ALLOWED_SCAN_FILES` allowlist so the stated scope equals the real scope.
+- **`OLLAMA_API_KEY` was missing from the configuration table** (`README.md`): the
+  variable that turns on the only cloud-capable path was undocumented.
+
+### Verified (executed, not read)
+- **The bug, reproduced then closed**: with no `OLLAMA_API_KEY` in the environment and
+  a key present in `.secrets/ollama.json`, the old `llm_destination()` returned
+  `('cloud', "…if a key is configured, else local fallback")` — ambiguous at best.
+  The patched version returns
+  `('cloud', 'Ollama cloud (ollama.com) — key from secrets-file — content leaves this machine')`.
+- **Local-only still wins**: `TRACE_LLM_LOCAL_ONLY=1` returns
+  `('local', 'local Ollama (127.0.0.1:11434) — forced by TRACE_LLM_LOCAL_ONLY')` before
+  any key lookup runs.
+- **Env override**: `OLLAMA_API_KEY` set returns `('cloud', '… — key from env — …')`.
+- `ast.parse()` clean on the modified module.
+
+### Documented (scanner false positives — not defects)
+- **Tainted flow `os.environ` → `urlopen`** in `consolidate_advisor.py` (~318) and
+  `trace_extractor.py` (~359): the first targets `OLLAMA_URL`, produced by
+  `get_safe_ollama_url()` and constrained to a loopback allowlist at import; the second
+  targets the literal `http://127.0.0.1:11434`. Loopback sinks, not exfiltration sinks.
+- **"Credential Access"** on `SECRET_SKIP_PATTERNS` / `SECRET_PATH_PATTERNS` and on the
+  markdown that documents them: a deny-list that names what it refuses is a control,
+  not a credential read. Firing on the prose of a fix is a category error.
+- **"Autonomous Decision Making"** in `auto_archive.py` / `consolidate_advisor.py`:
+  the scanner quotes the `if not sys.stdin.isatty(): return` guard as though it forced
+  the action. It is the human-in-the-loop branch.
+- Full dispositions: `docs/SECURITY-AUDIT-NOTES.md` §2.6.
+
+### Files Modified (4)
+`trace_extractor.py`, `README.md`, `SKILL.md`, `CHANGELOG.md`, plus
+`docs/SECURITY-AUDIT-NOTES.md`
+
 ## v2.2.1 — Disclose the LLM Transport, Harden PII Scrubbing (2026-10-02)
 
 Closes the T09 finding raised by the ClawHub / SkillSpector scan on 2026-10-02:

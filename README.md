@@ -1,12 +1,20 @@
 # 🧠 OpenClaw Memory Pipeline
 
 **Complete memory management pipeline for OpenClaw agents: extraction, archiving,
-scoring, consolidation, health monitoring, and hybrid search — all local-first.**
+scoring, consolidation, health monitoring, and hybrid search — local by default.**
 
 Seven standalone Python scripts that form a complete memory lifecycle pipeline for
-[OpenClaw](https://github.com/openclaw/openclaw) agents. No external API dependencies
-(Ollama runs locally via HTTP, no cloud APIs)
-— works with any local LLM (Ollama, LM Studio, etc.) or fully without LLM in fallback mode.
+[OpenClaw](https://github.com/openclaw/openclaw) agents. Everything runs on this
+machine out of the box: Ollama over local HTTP, no cloud account, no paid dependency
+— works with any local LLM (Ollama, LM Studio, etc.) or fully without LLM in fallback
+mode.
+
+> **One exception, and it is opt-in:** `trace_extractor.py` can use **Ollama cloud**
+> (`https://ollama.com`) when an API key is configured, because that content leaves
+> the machine. With **no key configured it stays local**, and
+> **`TRACE_LLM_LOCAL_ONLY=1` refuses every cloud call outright**. Every run prints its
+> destination first (`[Security] ⚠️ CLOUD TRANSMISSION: …`). See
+> [Security Notes](#security-notes).
 
 Built for local-first OpenClaw setups (Ollama/GLM, nomic-embed-text).
 
@@ -194,7 +202,8 @@ Environment variables with defaults:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL (localhost only) |
 | `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
 | `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
-| `TRACE_LLM_LOCAL_ONLY` | _(unset)_ | Set to `1` to refuse cloud LLM calls and force local-only |
+| `TRACE_LLM_LOCAL_ONLY` | _(unset)_ | Set to `1` to refuse cloud LLM calls and force local-only. **Recommended for any privacy-sensitive deployment.** |
+| `OLLAMA_API_KEY` | _(unset)_ | Enables **Ollama cloud** (`ollama.com`) in `trace_extractor.py`. Unset = local only |
 
 ## Requirements
 
@@ -221,7 +230,7 @@ python3 scripts/memory_health.py --deep
 
 ## Design Principles
 
-1. **Local-first** — no external API, no paid dependencies
+1. **Local by default** — no cloud account, no paid dependency. The single cloud-capable path is `trace_extractor.py` and it is opt-in via `OLLAMA_API_KEY`, disclosed on every run, and cancellable with `TRACE_LLM_LOCAL_ONLY=1`
 2. **Composable** — each script is standalone, can run independently
 3. **Safe by default** — dry-run available for all analysis scripts; `memory-health.py` is read-only by default. Some nightly cron commands modify files by default (archive, scores, consolidation report). Review cron commands before deploying.
 4. **Human-in-the-loop** — consolidation suggestions, not auto-merge
