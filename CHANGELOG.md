@@ -2,6 +2,45 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.1.0 — Recursive Archive Scan + Nightly Index Guard (2026-10-03)
+
+Feature release. The hybrid search index was silently blind to every archived
+note filed in a sub-folder, and the nightly job could index nothing at all
+without anyone noticing. Both are fixed and both now fail loudly.
+
+### Added
+- **Recursive archive scanning.** `hybrid_search.py` now scans
+  `memory/archive/**/*.md` instead of `memory/archive/*.md`. The non-recursive
+  glob only saw top-level files and missed every month/themed sub-folder
+  (`archive/2026-07/`, `archive/2026-08/`, `april-2026/`, `june-2026/`, …):
+  **174 archived notes were invisible to search**, and the DB covered 28 days
+  instead of ~6 months. Sources keep their relative path
+  (`archive/2026-07/2026-07-15.md`) so `delete_by_source` stays unambiguous.
+- **Hard verification in the nightly job.** The job now captures the chunk count
+  before and after indexing and writes one timestamped line to
+  `logs/nightly-index.log` **every night, success or failure**:
+  `status=<ok|ERROR> files=<n> chunks=<before>-><after> indexed_delta=<d> msg=…`.
+  `status=ok` requires the indexing to have run, `chunks > 0`, and `Last indexed`
+  from the current night; anything else is an explicit `ERROR`.
+- **Native failure alert to Telegram** on the nightly job (after 1 error,
+  1h cooldown), covering crashes/timeouts that the internal check cannot see.
+
+### Fixed
+- **The nightly job ran with an interpreter that could not index.** The job
+  called `python3` (system), which does **not** have `sqlite-vec`; the extraction
+  step worked but the indexing step silently wrote nothing. Job status was `ok`
+  while the index stayed frozen — a silent failure that had gone unnoticed.
+  Both steps now run under `skills/memory-health/.venv/bin/python`.
+
+### Verified
+- Reindex: **68 → 239 files, 1238 → 2167 chunks** (three layers aligned:
+  2167 memories = 2167 FTS = 2167 vec).
+- End-to-end proof: a witness note was indexed by the nightly job and retrieved
+  by the search (`ZORBLAX-7729`), then removed and the orphan chunk deleted
+  (2168 → 2167).
+- Old `scripts/nightly-extraction.py` (last executed 2026-07-22, no remaining
+  caller) retired to `.archive/retired-scripts/`.
+
 ## v3.0.3 — trace_extractor Ported From the Local Skill (2026-10-03)
 
 Behaviour fix, ported from the installed skill copy. The skill's
