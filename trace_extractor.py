@@ -293,21 +293,63 @@ def extract_with_llm(text, dry_run=False):
             print(f"   [Security] Sending sanitized excerpt to {label} (stays on this machine)")
 
     def parse_llm_output(output):
-        """Extract JSON from LLM output, fixing common issues."""
-        json_match = re.search(r'\{[\s\S]*\}', output)
-        if not json_match:
+        """Extract JSON from LLM output, fixing common issues.
+
+        Handles: markdown fences, trailing commas, single quotes, and
+        TRUNCATED output (done_reason=length) by salvaging the largest
+        valid JSON prefix and closing open brackets.
+        """
+        if not output or not output.strip():
             return None
-        json_str = json_match.group()
-        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-        json_str = re.sub(r'^```json\s*', '', json_str)
-        json_str = re.sub(r'\s*```$', '', json_str)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
+        json_match = re.search(r'\{[\s\S]*\}', output)
+        json_str = json_match.group() if json_match else None
+
+        def _try(s):
+            s = re.sub(r',\s*([}\]])', r'\1', s)
+            s = re.sub(r'^```json\s*', '', s)
+            s = re.sub(r'\s*```$', '', s)
             try:
-                return json.loads(json_str.replace("'", '"'))
+                return json.loads(s)
             except json.JSONDecodeError:
-                return None
+                try:
+                    return json.loads(s.replace("'", '"'))
+                except json.JSONDecodeError:
+                    return None
+
+        if json_str is not None:
+            parsed = _try(json_str)
+            if parsed is not None:
+                return parsed
+
+        # Truncation salvage (STRICT): keep only FULLY-PARSED elements that
+        # appear before the cut. If an object is incomplete, drop it entirely
+        # rather than keep an amputated value — a truncated fact is worse than
+        # no fact in long-term memory. Never invents content.
+        start = output.find('{')
+        if start < 0:
+            return None
+        frag = output[start:]
+        # Cut at the last top-level-friendly boundary: last comma that is NOT
+        # inside an unterminated string. Simpler robust approach: repeatedly
+        # trim the tail until the fragment closes cleanly or we run out.
+        candidates = []
+        # Try dropping progressively from the last comma backwards.
+        idx = len(frag)
+        while True:
+            cut = frag.rfind(',', 0, idx)
+            if cut < 0:
+                break
+            cand = frag[:cut]
+            dc = cand.count('{') - cand.count('}')
+            ds = cand.count('[') - cand.count(']')
+            if cand.count('"') % 2 == 0 and dc >= 0 and ds >= 0:
+                closed = cand + ']' * ds + '}' * dc
+                p = _try(closed)
+                if p is not None:
+                    print("   ♻️  Salvaged strict partial JSON (dropped incomplete trailing element)")
+                    return p
+            idx = cut
+        return None
 
     def get_ollama_api_key():
         """Get Ollama API key, in order of precedence:
@@ -335,13 +377,13 @@ def extract_with_llm(text, dry_run=False):
             print("   ⚠️ No Ollama API key available")
             return None
         payload = json.dumps({
-            "model": os.environ.get("TRACE_LLM_MODEL", "deepseek-v4-flash"),
+            "model": os.environ.get("TRACE_LLM_MODEL", "deepseek-v4.1-flash:cloud"),
             "messages": [
                 {"role": "system", "content": "You extract structured information from daily notes. Respond ONLY with valid JSON."},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0.1, "num_predict": int(os.environ.get("TRACE_LLM_MAX_TOKENS", "8000"))},
+            "options": {"temperature": 0.1, "num_predict": int(os.environ.get("TRACE_LLM_MAX_TOKENS", "16000"))},
         }).encode('utf-8')
         req = urllib.request.Request(
             "https://ollama.com/api/chat",
@@ -351,7 +393,11 @@ def extract_with_llm(text, dry_run=False):
         timeout = 120 + (attempt * 30)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-            return result.get("message", {}).get("content", "")
+            content = result.get("message", {}).get("content", "")
+            done_reason = result.get("done_reason", "")
+            if done_reason == "length":
+                print("   ⚠️ Ollama cloud: response TRUNCATED (done_reason=length) — output hit num_predict cap")
+            return content
 
     def call_ollama(attempt):
         """Call local Ollama (qwen2.5:7b fallback). Returns raw content or None."""
@@ -372,20 +418,23 @@ def extract_with_llm(text, dry_run=False):
             result = json.loads(resp.read().decode('utf-8'))
             return result.get("message", {}).get("content", "")
 
-    # Primary: Ollama cloud (3 retries) — bascule 11/09/2026 (fin DeepSeek direct)
-    for attempt in range(3):
+    # Primary: Ollama cloud (2 retries) — rattrapage sur réponse tronquée/absente.
+    # (1 seul essai laissait passer les coupures ; 3 faisaient perdre ~6 min.
+    #  Un retry au 1er échec suffit à rattraper une troncature, coût faible.)
+    for attempt in range(2):
         try:
             output = call_ollama_cloud(attempt)
             if output and output.strip():
                 parsed = parse_llm_output(output)
                 if parsed is not None:
                     return parsed
-                print(f"   ⚠️ JSON parse failed (attempt {attempt+1}/3)")
+                print(f"   ⚠️ JSON parse failed (attempt {attempt+1}/2)")
             else:
-                print(f"   ⚠️ Empty Ollama response (attempt {attempt+1}/3)")
+                print(f"   ⚠️ Empty Ollama response (attempt {attempt+1}/2)")
         except Exception as e:
-            print(f"   ⚠️ Ollama API error: {e} (attempt {attempt+1}/3)")
-        time.sleep(2 ** attempt)
+            print(f"   ⚠️ Ollama API error: {e} (attempt {attempt+1}/2)")
+        if attempt == 0:
+            time.sleep(1)
 
     # Fallback: Ollama local
     print("   ⚠️ Ollama cloud failed, falling back to local Ollama (qwen2.5:7b)...")
