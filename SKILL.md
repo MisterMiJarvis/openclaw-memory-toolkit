@@ -25,7 +25,7 @@ Nightly Cron (23h)
 
 All scripts are standalone and composable. Run individually or as a pipeline.
 
-## Fact lifecycle (v3.0.0)
+## Fact lifecycle (introduced in v3.0.0)
 
 The search DB no longer just accumulates facts: every fact carries a lifecycle
 (`active` / `superseded` / `disputed`) and only `active` facts are ever
