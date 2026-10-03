@@ -35,7 +35,8 @@ MEMORY_FILE = WORKSPACE / "MEMORY.md"
 ONTOLOGY_FILE = WORKSPACE / "memory" / "ontology" / "graph.jsonl"
 DAILY_NOTES_DIR = WORKSPACE / "memory"
 TRACE_EXTRACTOR = WORKSPACE / "skills" / "trace-extractor" / "trace-extractor.py"
-# LOCOMO_TEST: hardcoded relative path — no env var to prevent taint flow
+# LoCoMo benchmark harness. Optional: the skill works without it. When absent,
+# --benchmark reports "not available" and never silently pretends to have run.
 LOCOMO_TEST = (WORKSPACE / "skills" / "locomo-test" / "locomo_test.py").resolve()
 if not LOCOMO_TEST.is_relative_to(WORKSPACE):
     LOCOMO_TEST = WORKSPACE / "skills" / "locomo-test" / "locomo_test.py"
@@ -266,19 +267,35 @@ def check_index():
 
 
 def run_benchmark():
-    """Run LoCoMo memory benchmark."""
+    """Run the LoCoMo memory benchmark.
+
+    The harness is optional: if it is not installed, report NOT AVAILABLE and mark
+    the run as failed. Never return a success-looking status for a benchmark that
+    did not actually execute.
+    """
     if not LOCOMO_TEST.exists():
-        return {"error": "LoCoMo test script not found"}
-    
+        return {
+            "error": "LoCoMo benchmark harness not installed",
+            "status": "⚠️ NOT AVAILABLE — skills/locomo-test/locomo_test.py missing",
+            "available": False,
+        }
+
     try:
         # SECURITY: Local subprocess execution only. Outbound HTTP calls are isolated to the local Ollama API.
         result = subprocess.run(
             [sys.executable, str(LOCOMO_TEST), "results"],
             capture_output=True, text=True, timeout=30, cwd=str(WORKSPACE)
         )
-        return {"output": result.stdout[:1000], "status": "✅ Benchmark run"}
+        if result.returncode != 0:
+            return {
+                "error": f"harness exited {result.returncode}",
+                "status": f"⚠️ NOT AVAILABLE — harness failed: {result.stderr.strip()[:160]}",
+                "available": True,
+                "ran": False,
+            }
+        return {"output": result.stdout[:1000], "status": "✅ Benchmark run", "available": True, "ran": True}
     except Exception as e:
-        return {"error": str(e), "status": f"⚠️ Benchmark failed: {e}"}
+        return {"error": str(e), "status": f"⚠️ Benchmark failed: {e}", "available": True, "ran": False}
 
 
 def check_drift(last_health=None):

@@ -28,6 +28,7 @@ import sqlite3
 import struct
 import sys
 import time
+from datetime import datetime
 import urllib.request
 import urllib.error
 import glob
@@ -340,6 +341,16 @@ class HybridMemoryStore:
         self.conn.commit()
         return mem_id
 
+    def delete_by_source(self, source: str) -> int:
+        """Remove every chunk belonging to a source file. Returns rows deleted.
+
+        Used by incremental indexing: re-indexing a changed file must replace its
+        old chunks, never append duplicates.
+        """
+        cur = self.conn.execute("DELETE FROM memories WHERE source = ?", (source,))
+        self.conn.commit()
+        return cur.rowcount
+
     def search_lexical(self, query: str, limit: int = 20) -> list[dict]:
         """BM25 lexical search via FTS5. Only active facts are returned."""
         fts_query = clean_fts_query(query)
@@ -594,7 +605,13 @@ def safe_resolve(fpath: str) -> str:
 
 def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
                source: str, base_score: float, delay: float = 0.1) -> tuple[int, int]:
-    """Index a single file. Returns (chunks_indexed, errors)."""
+    """Index a single file. Returns (chunks_indexed, errors).
+
+    Incremental: any existing chunks for this source are removed first, so a
+    re-index of a changed file replaces its old chunks instead of duplicating
+    them. Freshness is decided by cmd_index via source_freshness().
+    """
+    store.delete_by_source(source)
     try:
         safe_path = safe_resolve(fpath)
     except UnsafeFileError as e:
@@ -627,6 +644,18 @@ def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
             errors += 1
 
     return (indexed, errors)
+
+
+def source_freshness(store: "HybridMemoryStore") -> dict:
+    """Map source -> latest chunk created_at, to decide what changed.
+
+    Returns {source: iso_timestamp}. A source missing from this map has never
+    been indexed.
+    """
+    rows = store.conn.execute(
+        "SELECT source, MAX(created_at) FROM memories GROUP BY source"
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
@@ -849,7 +878,17 @@ def cmd_index(args):
     total_files = len(file_list)
     total_chunks = 0
     total_errors = 0
+    total_skipped = 0
     start_time = time.time()
+
+    # Incremental: skip files whose newest indexed chunk is newer than the file's
+    # mtime. --full forces a complete re-index. This is what makes a nightly run
+    # cheap (seconds) instead of rebuilding all 1238 chunks every night.
+    freshness = {} if args.full else source_freshness(store)
+    if args.full:
+        print("  (--full: re-indexing every source)")
+    elif freshness:
+        print(f"  (incremental: {len(freshness)} sources already indexed)")
 
     print(f"══════════════════════════════════════════════════════════════")
     print(f"  Indexing {total_files} files...")
@@ -865,6 +904,17 @@ def cmd_index(args):
             print(f"  [SKIP] {finfo['source']} (not found)", flush=True)
             total_errors += 1
             continue
+
+        # Incremental freshness check: skip unchanged, already-indexed sources.
+        if not args.full and finfo["source"] in freshness:
+            try:
+                file_mtime = datetime.utcfromtimestamp(os.path.getmtime(fpath)).isoformat(sep=" ", timespec="seconds")
+                indexed_at = freshness[finfo["source"]]
+                if indexed_at and indexed_at >= file_mtime:
+                    total_skipped += 1
+                    continue
+            except Exception:
+                pass  # unreadable mtime -> index it rather than risk a stale entry
 
         is_jsonl = finfo.get("jsonl", False)
         if is_jsonl:
@@ -1037,6 +1087,7 @@ def main():
     idx_parser.add_argument("--category", help="Override category for all files")
     idx_parser.add_argument("--layer", help="Override layer for all files")
     idx_parser.add_argument("--yes", action="store_true", help="Skip consent warning prompt for batch indexing")
+    idx_parser.add_argument("--full", action="store_true", help="Re-index every source, ignoring freshness (default is incremental)")
 
     # query
     q_parser = subparsers.add_parser("query", help="Search the index")
