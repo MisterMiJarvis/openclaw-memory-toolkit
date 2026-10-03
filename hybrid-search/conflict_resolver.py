@@ -86,7 +86,14 @@ def get_safe_ollama_url(env_var: str, default: str) -> str:
 
 
 OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_GEN_URL = os.environ.get("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + "/api/generate")
+# SECURITY: OLLAMA_GEN_URL is read through the SAME loopback guard as OLLAMA_URL.
+# An earlier version used `os.environ.get("OLLAMA_GEN_URL", ...)` directly, which
+# bypassed the check: a crafted environment could point the generation endpoint
+# at a remote host while this module's docstring still claimed "fixed to localhost
+# at import time", and each classification POSTs two memory facts to it. The
+# generated URL is derived from the already-validated OLLAMA_URL, so the default
+# remains loopback and any explicit override must pass the allowlist too.
+OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + "/api/generate")
 LLM_MODEL = os.environ.get("CONFLICT_LLM_MODEL", os.environ.get("TRACE_LLM_MODEL", "glm-5.2"))
 
 # Confidence below which a weak contradiction is escalated to `disputed`

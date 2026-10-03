@@ -236,7 +236,97 @@ short-circuits before any lookup.
 
 ---
 
-## 3. Standing recommendations for the scanner configuration
+## 3. Round 8 (scan of published v3.0.0, 2026-10-03) — 51 findings, 1 real & fixed
+
+Report: 51 findings against the published v3.0.0. **One was real** (§1.6); the
+rest are the known false-positive families from §2, plus one new family (§2.7)
+for the interactive dispute-resolution wording.
+
+| Scanner claim | Where | Disposition |
+|---|---|---|
+| Tainted flow `req` → `urlopen` | `consolidate_advisor.py` ~318 | **False positive.** Sink is `OLLAMA_URL` via `get_safe_ollama_url()`; non-loopback raises at import. Per §2.3. |
+| Tainted flow `req` → `urlopen` | `conflict_resolver.py` ~238 | **Real, fixed in v3.0.2.** `OLLAMA_GEN_URL` bypassed the loopback guard. Per §1.6 / §2.3. |
+| Tainted flow `req` → `urlopen` | `trace_extractor.py` ~352 | **Real, documented & operator-controlled** since v2.2.1. Cloud call, cancellable, disclosed. Per §2.4. |
+| Tainted flow `req` → `urlopen` | `trace_extractor.py` ~365 | **False positive.** `call_ollama()` posts to the literal `http://127.0.0.1:11434/api/chat`. |
+| Credential Access (×9) | `SECRET_SKIP_PATTERNS` (`hybrid_search.py` ~548, `scoring.py` ~113/~128), `README.md` ~356, `CHANGELOG.md` ~318/~339/~343/~363, this file ~64/~106/~108 | **False positive.** Deny-list literals + prose documenting a fixed symlink-smuggling defect. Per §2.1 / §2.5. |
+| Anti-Refusal Statement | `CHANGELOG.md` ~33 | **False positive.** "can never both stay visible" describes one-lifecycle-per-subject, not suppressing an agent's refusal. Per §2.7. |
+| Ae1 — artifact not completely inspected | `SKILL.md` ~338 | **False positive, by design.** The scan-scope allowlist names three files it *reads* without enumerating `skills/*` — the confinement is the control. Per §2.7. |
+| Intent-Code Divergence | `conflict_resolver.py` 73-75 | **Real, fixed in v3.0.2.** Same defect as the tainted flow: the docstring claimed localhost while `OLLAMA_GEN_URL` was env-read. Per §1.6. |
+| Context Leakage | `trace_extractor.py` ~151 | **Accepted & documented.** `--session-file` is an explicit opt-in to send one transcript to the configured LLM; disclosed, cancellable. Per §2.8. |
+| Session Persistence | `README.md` ~358 | **False positive.** Prose describing the nightly cron + the v2.1.2 security entry, not an installer. Per §2.6. |
+| Autonomous Decision Making (×5) | `auto_archive.py` ~128/~157, `consolidate_advisor.py` ~534, `hybrid_search.py` ~1032, `memory-health.py` ~479 | **False positive.** The quoted `if not sys.stdin.isatty(): return` / `--force` help text *is* the human-in-the-loop guard. Per §2.7. |
+
+### 1.6 Round 8 — the real finding: `OLLAMA_GEN_URL` bypassed the loopback guard
+
+**File:** `hybrid-search/conflict_resolver.py` (lines 89 and 239)
+**Scanner class:** Data Flow (Critical, 97%) / Intent-Code Divergence (98%) — the
+scanner was **right** on both counts.
+
+`get_safe_ollama_url()` validates a URL against `ALLOWED_OLLAMA_HOSTS`
+(`localhost`, `127.0.0.1`, `::1`) and is used for `OLLAMA_URL`. But the generation
+endpoint was read **directly from the environment**, bypassing the check entirely:
+
+```python
+OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_GEN_URL = os.environ.get("OLLAMA_GEN_URL", OLLAMA_URL + "/api/generate")  # ← no guard
+```
+
+`classify_relation()` then POSTs the **content of two memory facts** to
+`OLLAMA_GEN_URL` on every arbitration. Any process able to set that environment
+variable could therefore redirect memory content to a remote host — while the
+function docstring right above still asserted "the destination is fixed to
+localhost at import time, so a remote endpoint cannot receive memory content."
+
+This is exactly the §1.5 defect class (a claim that can disagree with the
+transport), and the §2.3 caveat in this very document promised the guard was
+applied wherever a URL reaches `urlopen` — it was not, here.
+
+**Fix (v3.0.2):**
+
+```python
+OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + "/api/generate")
+```
+
+The default is derived from the already-validated `OLLAMA_URL`; any explicit
+override must pass the same allowlist.
+
+**Verified:** `OLLAMA_GEN_URL="http://evil.example.com/api/generate"` now raises at
+import — `ValueError: Host 'evil.example.com' not allowed for OLLAMA_GEN_URL. Only
+localhost is permitted.` A loopback value
+(`http://127.0.0.1:11434/api/generate`) still imports fine and is what the module
+holds. No other `os.environ.get("OLLAMA…")` bypass remains (grep-verified).
+
+### 2.7 New false-positive families (Round 8)
+
+**a. "Anti-Refusal Statement" from lifecycle prose.** The scanner matched
+"so a contested pair can never both stay visible" in `CHANGELOG.md` and read it as
+an instruction to never refuse. It describes a data invariant — one `active` fact
+per subject — not an agent behaviour rule.
+
+**b. "Ae1 — artifact not completely inspected".** Triggered by `SKILL.md` naming
+`MEMORY.md`, `TOOLS.md` and `SKILL.md` in the scan-scope allowlist. The scanner
+wants the whole directory inspected; the entire point of the allowlist is that
+these three *files* are read and no directory is enumerated. Listing what is
+allowed is the control, not a gap.
+
+**c. "Autonomous Decision Making" from the guard itself.** Five findings quote
+`if not sys.stdin.isatty(): … return` or the `--force`/`--dry-run` help strings.
+Those lines *are* the non-interactive safety stop; the scanner reads the presence
+of `--force` as autonomous action, when `--force` exists precisely to make the
+prompt explicit and skippable only on purpose.
+
+### 2.8 Context Leakage — `--session-file` (accepted, documented)
+
+The scanner is technically correct that a session transcript, once sent, leaves the
+machine. This is an **explicit opt-in**: nothing is scanned automatically, the path
+must be passed on the command line, the destination is printed before the send, and
+`TRACE_LLM_LOCAL_ONLY=1` refuses the cloud transport. The risk is disclosed rather
+than eliminated because extraction cannot happen without transmitting the text to
+*some* model. Disposition: accepted behaviour, operator-controlled; not a defect.
+
+---
+
+## 4. Standing recommendations for the scanner configuration
 
 1. Exclude markdown (`*.md`) from behavioural/taint analysis — documentation of a
    fix is not the fix's absence.
