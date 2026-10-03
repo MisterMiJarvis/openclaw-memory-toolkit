@@ -2,6 +2,46 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.0.3 — trace_extractor Ported From the Local Skill (2026-10-03)
+
+Behaviour fix, ported from the installed skill copy. The skill's
+`trace-extractor.py` (891 lines, written 03/10 07:07) had moved ahead of the repo
+(842 lines); the repo copy was stale and is now identical.
+
+### Fixed
+- **Strict truncation salvage in `parse_llm_output()`.** When the cloud model hits
+  `done_reason=length`, the response is cut mid-JSON. The parser now salvages only
+  the *fully-parsed elements* that appear before the cut, dropping an incomplete
+  object entirely rather than keeping an amputated value — a truncated fact is
+  worse than no fact in long-term memory. It never invents content.
+- **Cloud model.** `deepseek-v4-flash` returned HTTP 410 Gone; switched to
+  `deepseek-v4.1-flash:cloud`.
+
+### Verified
+- The installed version is a functional superset of the repo copy (21 replaced /
+  70 added lines, no repo-only content lost).
+- Repo and skill converge on the same 891-line file (md5-identical).
+
+## v3.0.2 — Security: `OLLAMA_GEN_URL` Loopback Guard (2026-10-03)
+
+Round 8 security scan of the published v3.0.0 returned 51 findings; one was real
+and is fixed here, the rest are triaged in `docs/SECURITY-AUDIT-NOTES.md` §3.
+
+### Fixed
+- **`hybrid-search/conflict_resolver.py` bypassed the loopback guard.**
+  `OLLAMA_GEN_URL` was read directly from `os.environ`, skipping
+  `get_safe_ollama_url()`. `classify_relation()` POSTs the content of two memory
+  facts to that URL on every arbitration, so a crafted environment could redirect
+  memory content to a remote host while the docstring still claimed "fixed to
+  localhost at import time". Routed through the same loopback allowlist as
+  `OLLAMA_URL`; a non-loopback override now raises at import.
+
+### Verified
+- `OLLAMA_GEN_URL="http://evil.example.com/api/generate"` → `ValueError: Host
+  'evil.example.com' not allowed for OLLAMA_GEN_URL. Only localhost is permitted.`
+- `OLLAMA_GEN_URL="http://127.0.0.1:11434/api/generate"` → imports fine.
+- No other `os.environ.get("OLLAMA…")` bypass remains (grep-verified).
+
 ## v3.0.1 — SKILL.md Actually Ships the v3.0.0 Content (2026-10-03)
 
 Documentation-only fix. v3.0.0 shipped correct code, CHANGELOG and README, but
