@@ -13,11 +13,22 @@ Nightly Cron (23h)
   ├─ 2. auto_archive.py       # Archive daily notes >21 days
   ├─ 3. scoring.py            # Score all memories with temporal decay
   ├─ 4. consolidate_advisor.py # Suggest consolidations (agent reviews)
-  ├─ 5. memory_health.py      # Periodic health check (weekly)
-  └─ 6. hybrid_search.py      # Hybrid search: FTS5 + sqlite-vec + RRF
+  ├─ 5. conflict_resolver.py   # Arbitrate contradictory facts (NLI lifecycle)
+  ├─ 6. memory_health.py       # Periodic health check (weekly)
+  └─ 7. hybrid_search.py      # Hybrid search: FTS5 + sqlite-vec + RRF
 ```
 
 All scripts are standalone and composable. Run individually or as a pipeline.
+
+## Fact lifecycle (v2.2.0)
+
+The search DB no longer just accumulates facts: every fact carries a lifecycle
+(`active` / `superseded` / `disputed`) and only `active` facts are ever
+retrieved. `conflict_resolver.py` runs the four-step consistency pipeline:
+atomic extraction → targeted retrieval of concurrent active facts → NLI
+classification (`CONTRADICTION` / `REDUNDANT` / `COMPATIBLE`) → traceable state
+update. A weak contradiction is escalated to `disputed` rather than silently
+destroying an established fact.
 
 ## Scripts
 

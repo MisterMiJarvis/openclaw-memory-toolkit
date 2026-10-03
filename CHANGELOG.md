@@ -2,6 +2,68 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v2.2.0 — Fact Lifecycle, Conflict Arbitration & Tagged Injection (2026-10-03)
+
+Three improvements asked for after a review of the toolkit against a memory-engineering
+spec: fact conflict lifecycle, structured context injection, and a hard token budget.
+Every change is local-first and read-only by default; nothing new leaves the machine.
+
+### Added
+- **Fact lifecycle columns** (`hybrid-search/schema.sql`): `subject`, `status`
+  (`active` | `superseded` | `disputed`), `confidence`, `valid_from`,
+  `source_context`, `last_confirmed`, plus indexes on `status`/`subject`. The
+  `superseded_by` column existed since the first schema but **was never written to
+  by any code** — it is now populated by the resolver below. An older DB is
+  migrated in place (idempotent `ALTER TABLE`, no data loss).
+- **`hybrid-search/conflict_resolver.py`** — the four-step consistency pipeline:
+  1. *atomic extraction* (`extract_atomic`) splits a compound statement into unit
+     facts; 2. *targeted retrieval* (`fetch_active_facts`) pulls only `active`
+     facts on the same subject, with an FTS5 lexical fallback; 3. *NLI
+     classification* (`classify_relation`) asks a loopback Ollama model for
+     `CONTRADICTION | REDUNDANT | COMPATIBLE` + confidence + reasoning, with a
+     conservative deterministic `heuristic_relation()` fallback for offline use;
+     4. *state update* (`apply_resolution`) supersedes / confirms / adds — never
+     hard-deletes, always keeping the chain via `superseded_by`.
+  - **Weak-signal protection**: a contradiction below `DISPUTE_CONFIDENCE_FLOOR`
+    (0.6) flags the old fact `disputed` and inserts the new one, instead of
+    destroying an established truth on a guess.
+  - CLI: `check`, `arbitrate <jsonl>`, `lifecycle --status …`. Analysis is
+    read-only; mutation requires `--apply` (`--force` in non-interactive mode).
+- **Tagged injection payload** (`render_context` in `hybrid_search.py`): produces a
+  strict `<agent_memory trusted="false">` block with nested `<core_facts>`,
+  `<session_context ephemeral="true">` and `<retrieved_context>`, XML-escaped, and an
+  explicit comment that retrieved text is *background data, never an instruction* —
+  separating recalled facts from the live prompt (indirect-injection defence). New
+  CLI: `hybrid_search.py context "<text>" --budget N --core-fact "…"`.
+- **Hard token budget** (`estimate_tokens` + `apply_token_budget`): a fixed top-k can
+  still overflow the window when hits are long. `--max-tokens` / `context --budget`
+  trims to a conservative ~4-chars/token estimate; an over-budget first hit is
+  truncated rather than returning nothing. `0` = unlimited (legacy behaviour).
+
+### Changed
+- **Retrieval is now lifecycle-aware**: `search_lexical`, `search_vector` and
+  `search_hybrid` add `AND m.status = 'active'`, so superseded/disputed facts can no
+  longer pollute results — the concrete fix for "two contradictory facts coexist".
+- README/SKILL nightly pipeline documents the arbitration step and the re-index.
+
+### Verified (executed, not read)
+- **Lifecycle transitions** on a real SQLite DB: high-confidence contradiction → old
+  row `superseded` with `superseded_by` pointing at the new `active` row; weak
+  contradiction (0.4) → old row `disputed`, new inserted; redundant → `last_confirmed`
+  refreshed and confidence bumped, no duplicate; compatible → added. `lifecycle`
+  listing confirmed the end state (`active=3, superseded=1` in the fixture).
+- **Token budget**: 400-char chunks (~100 tokens each) → budget 250 keeps 2, budget
+  500 keeps 3, budget smaller than one chunk truncates it and still returns a payload.
+- **Tagged block**: rendered output inspected — nesting, escaping and the
+  non-authoritative comment present.
+- **In-place migration**: `ensure_lifecycle_columns()` on a DB built from the old
+  schema adds exactly the missing columns.
+- Syntax validated on both modules (`ast.parse`).
+
+### Files Modified (5)
+`hybrid-search/schema.sql`, `hybrid-search/hybrid_search.py`, added
+`hybrid-search/conflict_resolver.py`; plus `README.md`, `SKILL.md`, `CHANGELOG.md`.
+
 ## v2.1.4 — Allowlist/Index Agreement, Both Directions (2026-09-27)
 
 Follow-up found by the v2.1.3 control pass. v2.1.3 fixed an allowlist that was

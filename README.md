@@ -19,7 +19,8 @@ Nightly Cron (23h)
   ├─ 2. auto_archive.py        # Archive daily notes >21 days
   ├─ 3. scoring.py             # Score all memories with temporal decay
   ├─ 4. consolidate_advisor.py # Suggest consolidations (agent reviews)
-  └─ 5. memory_health.py       # Periodic health check (weekly)
+  ├─ 5. conflict_resolver.py   # Arbitrate contradictory facts (NLI lifecycle)
+  └─ 6. memory_health.py       # Periodic health check (weekly)
 ```
 
 All scripts are standalone and composable. Run individually or as a pipeline.
@@ -135,7 +136,40 @@ python3 hybrid-search/hybrid_search.py status                  # Index stats
 Personal files (`USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are excluded.
 No sibling skill enumeration (`skills/*/SKILL.md` glob removed).
 
-### 7. `hybrid-search/run_tests.py` — Search validation
+### 7. `hybrid-search/conflict_resolver.py` — Fact lifecycle & conflict arbitration
+
+Implements the four-step consistency pipeline: **atomic extraction → targeted
+retrieval of concurrent `active` facts → NLI classification → traceable state
+update**. A new fact that contradicts an active one marks the old row
+`superseded` (`superseded_by` finally populated) and inserts the new one as
+`active`; a redundant fact refreshes `last_confirmed` instead of duplicating; a
+compatible fact is added. A **weak** contradiction (confidence below the floor)
+flags the old fact `disputed` and asks for confirmation rather than destroying a
+truth.
+
+```bash
+# Analyse one fact against active memory (read-only)
+python3 hybrid-search/conflict_resolver.py check "On a migré la BDD sur MySQL 8" --subject serveur_prod
+
+# Batch arbitration from a JSONL of {content, subject?} (dry-run)
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl
+
+# Persist resolutions (mutates DB)
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl --apply --force
+
+# Inspect lifecycle states
+python3 hybrid-search/conflict_resolver.py lifecycle --status superseded
+
+# Heuristic-only (no LLM, offline)
+python3 hybrid-search/conflict_resolver.py check "..." --subject x --no-llm
+```
+
+**Safety:** the LLM endpoint is loopback-only (same guard as `hybrid_search.py`);
+`--no-llm` gives a conservative lexical fallback that never auto-supersedes on a
+weak signal; analysis is read-only unless `--apply` is passed. Migrates an older
+DB in place (adds the lifecycle columns idempotently).
+
+### 8. `hybrid-search/run_tests.py` — Search validation
 
 Runs anonymized test queries against the hybrid search index.
 
@@ -172,6 +206,8 @@ Environment variables with defaults:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL (localhost only) |
 | `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
 | `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
+| `CONFLICT_LLM_MODEL` | `glm-5.2` | Model for conflict arbitration (NLI) |
+| `MEMORY_DB` | `hybrid-search/agent_memory.db` | Path to the search/lifecycle DB |
 
 ## Requirements
 
@@ -187,6 +223,12 @@ python3 scripts/trace_extractor.py --days 1
 python3 scripts/auto_archive.py
 python3 scripts/scoring.py
 python3 scripts/consolidate_advisor.py --no-llm
+python3 hybrid-search/hybrid_search.py index --yes   # refresh the search index
+
+# Conflict arbitration (batch, after indexing; dry-run first):
+#   emit candidate facts as JSONL, review the dry-run, then --apply
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl           # analyse
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl --apply --force
 
 # Weekly health check (Monday):
 python3 scripts/memory_health.py --quick
