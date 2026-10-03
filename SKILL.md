@@ -33,7 +33,10 @@ retrieved. `conflict_resolver.py` runs the four-step consistency pipeline:
 atomic extraction → targeted retrieval of concurrent active facts → NLI
 classification (`CONTRADICTION` / `REDUNDANT` / `COMPATIBLE`) → traceable state
 update. A weak contradiction is escalated to `disputed` rather than silently
-destroying an established fact.
+destroying an established fact; `pending` surfaces the queue and `resolve
+--confirm|--reject` lifts the ambiguity. `compact.py` moves terminal facts into a
+cold archive (`memories_archive` + JSONL audit) so the hot FTS5/vector indexes
+stay lean without losing traceability.
 
 ## Scripts
 

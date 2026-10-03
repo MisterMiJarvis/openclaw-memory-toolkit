@@ -194,12 +194,69 @@ python3 hybrid-search/conflict_resolver.py lifecycle --status superseded
 python3 hybrid-search/conflict_resolver.py check "..." --subject x --no-llm
 ```
 
+**Interactive resolution of blocked facts** — a `disputed` fact is a *suspended*
+state waiting for a human. `pending` surfaces the queue (cheap, deterministic) so
+the agent can raise it at the next relevant turn; `resolve` lifts the ambiguity
+explicitly. `--confirm` restores the wording to `active` **and supersedes any
+rival claim on the same subject**, so the pair can never both stay visible;
+`--reject` supersedes it and optionally inserts a corrected `--replacement`.
+Only rows currently `disputed` are eligible — resolving an `active` or already
+`superseded` row is refused.
+
+```bash
+# What is waiting for adjudication?
+python3 hybrid-search/conflict_resolver.py pending
+python3 hybrid-search/conflict_resolver.py pending --json
+
+# The wording stands -> active (rivals superseded)
+python3 hybrid-search/conflict_resolver.py resolve 42 --confirm
+
+# The wording was wrong -> superseded, with a corrected fact
+python3 hybrid-search/conflict_resolver.py resolve 42 --reject \
+    --replacement "The internal DNS is 10.0.0.99"
+```
+
 **Safety:** the LLM endpoint is loopback-only (same guard as `hybrid_search.py`);
 `--no-llm` gives a conservative lexical fallback that never auto-supersedes on a
 weak signal; analysis is read-only unless `--apply` is passed. Migrates an older
 DB in place (adds the lifecycle columns idempotently).
 
-### 8. `hybrid-search/run_tests.py` — Search validation
+### 8. `hybrid-search/compact.py` — Cold storage & lifecycle compaction
+
+The lifecycle work keeps `superseded`/`disputed` facts out of *retrieval*, but
+they still occupy the hot tables and their FTS5/vector indexes. Over months that
+inflates BM25 rank space, the `memories_vec` table and the stats. This compactor
+moves terminal facts into a **cold store** while keeping full traceability.
+
+```bash
+# Hot vs cold sizes
+python3 hybrid-search/compact.py --stats
+
+# What would be archived (superseded older than 30 days)
+python3 hybrid-search/compact.py --dry-run
+
+# Actually archive (MD5-verified backup + JSONL audit, then delete from hot)
+python3 hybrid-search/compact.py --apply --min-age-days 30
+python3 hybrid-search/compact.py --apply --include-disputed
+
+# Resurrect one archived fact
+python3 hybrid-search/compact.py --restore 42
+```
+
+**How "cold" works:** rows are copied verbatim into `memories_archive` in the
+same SQLite file (transactional, no cross-file join) and appended to a dated
+JSONL audit under `memory/audit/`; the hot rows are then `DELETE`d, which fires
+the existing triggers and removes them from FTS5 and the vector index — the
+actual perf win. **Never a hard delete of data, only a move.**
+
+**Safety:** mutation requires `--apply` (dry-run is the default); the whole DB is
+backed up via SQLite's backup API (a `copy2` on a live DB can capture a torn WAL)
+and checked before any write; a retention guard refuses to archive rows newer
+than `--min-age-days`; rows whose age cannot be proven are kept. Requires
+`sqlite-vec` (the vec0 trigger fires on delete) and refuses loudly rather than
+half-archiving if it is missing.
+
+### 9. `hybrid-search/run_tests.py` — Search validation
 
 Runs anonymized test queries against the hybrid search index.
 
@@ -265,6 +322,10 @@ python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl --apply --force
 # Weekly health check (Monday):
 python3 scripts/memory_health.py --quick
 python3 scripts/ontology_compact.py
+
+# Monthly cold-storage compaction (terminal facts out of the hot index):
+python3 hybrid-search/compact.py --dry-run
+python3 hybrid-search/compact.py --apply --min-age-days 30
 
 # Monthly deep check (manual):
 python3 scripts/memory_health.py --deep

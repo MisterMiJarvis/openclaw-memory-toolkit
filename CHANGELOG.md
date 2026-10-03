@@ -2,6 +2,74 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.0.0 — Cold Storage & Interactive Dispute Resolution (2026-10-03)
+
+Major version: the fact lifecycle introduced below is now complete end-to-end —
+facts enter, get arbitrated, get resolved by a human when ambiguous, and are
+finally compacted out of the hot index when terminal. The search DB becomes a
+managed store with a hot/cold boundary rather than an append-only pile.
+
+### Added
+- **`hybrid-search/compact.py`** — cold-storage compaction of terminal facts.
+  `superseded` (and optionally `disputed`) rows older than `--min-age-days` are
+  copied verbatim into `memories_archive` in the same SQLite file and appended to
+  a dated JSONL audit under `memory/audit/`, then `DELETE`d from the hot table —
+  which fires the existing triggers and removes them from FTS5 and the vector
+  index. That is the actual perf win: BM25 rank space and `memories_vec` no longer
+  carry dead facts. Never a hard delete of data, only a move; `--restore <id>`
+  rehydrates a single archived fact.
+  - Backed up first via SQLite's own `backup()` API (a `copy2` on a live DB can
+    capture a torn WAL), MD5-checked before any write; `--dry-run` is the default
+    and mutation requires `--apply`; a retention guard refuses to sweep rows newer
+    than `--min-age-days`, and rows whose age cannot be proven are kept.
+  - Requires `sqlite-vec`: the `memories_vec_ad` trigger fires on `DELETE`, so
+    without the extension the move would abort mid-transaction with "no such
+    module: vec0". The extension is now loaded on every connection, and the script
+    refuses loudly (instead of half-archiving) when it is missing but needed.
+- **Interactive dispute resolution** (`hybrid-search/conflict_resolver.py`):
+  - `pending` — surfaces unresolved `disputed` facts cheaply and deterministically
+    (`--json` for programmatic use), so an agent can raise the queue at the next
+    relevant turn without a runtime hook. This is the tool half of "resolve at the
+    next pertinent turn": the skill cannot decide relevance, but it can always
+    answer "what is waiting for a human?".
+  - `resolve <id> --confirm` — restores the wording to `active` **and supersedes
+    any rival claim on the same subject**, so a contested pair can never both stay
+    visible.
+  - `resolve <id> --reject [--replacement "…"]` — supersedes the wrong wording and
+    optionally inserts a corrected fact as the new `active` one, chaining
+    `superseded_by`.
+  - Only rows currently `disputed` are eligible; resolving an `active` or already
+    `superseded` row is refused, so the command cannot rewrite lifecycle state by
+    accident.
+
+### Changed
+- SKILL/README pipeline diagrams and the nightly cron block document the
+  arbitration, cold-storage and dispute-resolution steps.
+- Version moved to 3.0.0: this is the first release where the lifecycle is closed
+  end-to-end (create → arbitrate → resolve → compact), and it introduces the
+  hot/cold storage boundary — a schema/operational break worth a major bump.
+
+### Verified (executed, not read)
+- **Compaction**: a `superseded` fixture moved with `--apply --min-age-days 0` →
+  hot 4→3, FTS rows 4→3, archive 1, JSONL audit written, DB backup taken. Retention
+  guard: with `--min-age-days 30` on fresh rows, 0 eligible (correctly refused).
+- **Restore**: `--restore <id>` moved the row back (hot 4, archive 0, FTS 4); a
+  second restore refused with `not in archive` (idempotent).
+- **vec0 trigger bug caught by testing**: the first `--apply` failed with "no such
+  module: vec0" because the vec trigger fires on delete; fixed by loading the
+  extension on every connection, with an explicit refusal path when it is absent.
+- **Resolve**: `--confirm` on a disputed row restored it to `active` and superseded
+  its active rival (`superseded_rivals: [7]`), leaving one active fact per subject;
+  `--reject --replacement` superseded the wrong fact and inserted the correction
+  with a proper `superseded_by` chain; `pending` then reported none; resolving a
+  non-disputed row was refused (`id 6 is 'active', not 'disputed'`).
+- Syntax validated on all modules (`ast.parse`); CLI `--help` for both new command
+  surfaces inspected.
+
+### Files Modified (5)
+Added `hybrid-search/compact.py`; modified `hybrid-search/conflict_resolver.py`,
+`README.md`, `SKILL.md`, `CHANGELOG.md`.
+
 ## v2.2.0 — Fact Lifecycle, Conflict Arbitration & Tagged Injection (2026-10-03)
 
 Three improvements asked for after a review of the toolkit against a memory-engineering

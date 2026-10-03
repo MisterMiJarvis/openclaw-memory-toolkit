@@ -35,6 +35,11 @@ Usage:
 
     # Maintenance: list stale/superseded/disputed facts
     python3 conflict_resolver.py lifecycle --status superseded
+
+    # Interactive resolution of blocked facts
+    python3 conflict_resolver.py pending
+    python3 conflict_resolver.py resolve 42 --confirm
+    python3 conflict_resolver.py resolve 42 --reject --replacement "corrected fact"
 """
 
 import argparse
@@ -491,6 +496,112 @@ def cmd_lifecycle(args):
     conn.close()
 
 
+def cmd_pending(args):
+    """Surface unresolved `disputed` facts for the agent/user to adjudicate.
+
+    This is the *tool* half of "resolve at the next relevant turn": the skill
+    cannot decide when a turn is relevant, but it can answer "what is waiting
+    for a human?" cheaply and deterministically, so the agent can call it
+    contextually. Compact one-line-per-fact output, --json for programmatic use.
+    """
+    conn = connect(args.db)
+    ensure_lifecycle_columns(conn)
+    rows = conn.execute(
+        "SELECT id, content, subject, confidence, updated_at, source_context "
+        "FROM memories WHERE status='disputed' ORDER BY updated_at DESC LIMIT ?",
+        (args.limit,),
+    ).fetchall()
+    if args.json:
+        print(json.dumps([dict(r) for r in rows], indent=2, ensure_ascii=False))
+    elif not rows:
+        print("✅ no disputed facts pending")
+    else:
+        print(f"⚠️  {len(rows)} disputed fact(s) awaiting adjudication:")
+        for r in rows:
+            print(f"  #{r['id']}  subj={r['subject'] or '-'}  conf={r['confidence']}")
+            print(f"      {r['content'][:110]}")
+            if r["source_context"]:
+                print(f"      ctx: {str(r['source_context'])[:100]}")
+        print("\nResolve with:  conflict_resolver.py resolve <id> --confirm|--reject")
+    conn.close()
+
+
+def cmd_resolve(args):
+    """Explicitly lift the ambiguity on a `disputed` fact.
+
+    --confirm  : the current wording stands -> status back to `active`, and the
+                 contradiction that caused the dispute (if it is still present)
+                 is superseded by it, so retrieval stops showing both.
+    --reject   : the wording was wrong -> superseded, with an optional
+                 --replacement inserted as the new active fact.
+
+    Only rows currently in `disputed` are eligible: resolving an `active` or
+    already-`superseded` row is refused, so this command cannot be used to
+    rewrite lifecycle state by accident.
+    """
+    conn = connect(args.db)
+    ensure_lifecycle_columns(conn)
+    row = conn.execute("SELECT * FROM memories WHERE id=?", (args.id,)).fetchone()
+    if not row:
+        print(json.dumps({"resolved": False, "reason": f"id {args.id} not found"}))
+        conn.close()
+        return 1
+    if row["status"] != "disputed":
+        print(json.dumps({"resolved": False,
+                          "reason": f"id {args.id} is '{row['status']}', not 'disputed'"}))
+        conn.close()
+        return 1
+
+    ts = now_iso()
+    if args.confirm:
+        conn.execute(
+            "UPDATE memories SET status='active', confidence=1.0, last_confirmed=?, "
+            "updated_at=? WHERE id=?",
+            (ts, ts, args.id),
+        )
+        # Supersede any *other* active or disputed claim on the same subject that
+        # the confirmed fact now beats, so the pair cannot both stay visible.
+        # `IS` handles the NULL-subject case; explicit `= ?` for non-NULL.
+        if row["subject"] is not None:
+            rivals = conn.execute(
+                "SELECT id FROM memories WHERE status IN ('active','disputed') "
+                "AND id!=? AND subject=?",
+                (args.id, row["subject"]),
+            ).fetchall()
+        else:
+            rivals = conn.execute(
+                "SELECT id FROM memories WHERE status IN ('active','disputed') "
+                "AND id!=? AND subject IS NULL",
+                (args.id,),
+            ).fetchall()
+        superseded = []
+        for rival in rivals:
+            conn.execute(
+                "UPDATE memories SET status='superseded', superseded_by=?, updated_at=? WHERE id=?",
+                (args.id, ts, rival["id"]),
+            )
+            superseded.append(rival["id"])
+        action = "confirmed"
+        result = {"resolved": True, "id": args.id, "action": action,
+                  "superseded_rivals": superseded}
+    else:  # --reject
+        conn.execute(
+            "UPDATE memories SET status='superseded', updated_at=? WHERE id=?",
+            (ts, args.id),
+        )
+        new_id = None
+        if args.replacement:
+            new_id = _insert_fact(conn, args.replacement, row["subject"], "active",
+                                  1.0, "user-resolution", args.replacement, ts)
+            conn.execute("UPDATE memories SET superseded_by=? WHERE id=?", (new_id, args.id))
+        result = {"resolved": True, "id": args.id, "action": "rejected",
+                  "replacement_id": new_id}
+    conn.commit()
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    conn.close()
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fact conflict resolution — lifecycle, superseding, NLI arbitration"
@@ -517,6 +628,19 @@ def main():
     l.add_argument("--status", choices=["active", "superseded", "disputed"], help="Filter by status")
     l.add_argument("--limit", type=int, default=30)
     l.set_defaults(func=cmd_lifecycle)
+
+    p = sub.add_parser("pending", help="Surface unresolved `disputed` facts for adjudication")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.set_defaults(func=cmd_pending)
+
+    r = sub.add_parser("resolve", help="Explicitly lift the ambiguity on a `disputed` fact")
+    r.add_argument("id", type=int, help="id of the disputed fact")
+    g = r.add_mutually_exclusive_group(required=True)
+    g.add_argument("--confirm", action="store_true", help="The wording stands -> back to active")
+    g.add_argument("--reject", action="store_true", help="The wording was wrong -> superseded")
+    r.add_argument("--replacement", help="With --reject: corrected fact to insert as active")
+    r.set_defaults(func=cmd_resolve)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):
