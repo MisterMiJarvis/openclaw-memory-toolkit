@@ -2,6 +2,25 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.1.1 — README Split: Contributing Moved Out (2026-10-03)
+
+Documentation-only release. No behaviour change to any script.
+
+### Changed
+- **The "Release Pipeline" section moved from `README.md` to a new
+  `CONTRIBUTING.md`.** It documents the repo → skill → GitHub → ClawHub flow, the
+  release gate, and the anti-drift invariants — that is maintainer material, not
+  user material. Someone installing the skill from ClawHub has nothing to do with
+  our internal pipeline; the README should not make them read it.
+- **`README.md` now targets users only** and keeps a one-line pointer to
+  `CONTRIBUTING.md`, plus the short "MUST go through `scripts/release.sh`" warning.
+
+### Why
+Standard GitHub split: `README` = what it is / how to use it;
+`CONTRIBUTING` = how to maintain and release it. Keeping the maintenance detail
+out of the user-facing README makes the ClawHub listing cleaner without losing
+any of the release discipline.
+
 ## v3.1.0 — Recursive Archive Scan + Nightly Index Guard (2026-10-03)
 
 Feature release. The hybrid search index was silently blind to every archived
