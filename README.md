@@ -34,6 +34,37 @@ Nightly Cron (23h)
 
 All scripts are standalone and composable. Run individually or as a pipeline.
 
+## Release Pipeline (repo → skill → GitHub → ClawHub)
+
+One artifact, one direction, four stages. **Never edit the installed skill directly;
+never let the repo and the skill drift.**
+
+```
+  local repo          installed skill            GitHub            ClawHub
+  .work/mh-v213  ──▶  skills/memory-health/  ──▶  push main + tag ──▶  manual (Stéphane)
+```
+
+1. **Edit in the repo** (`.work/mh-v213`). Commit there.
+2. **Sync repo → skill.** The installed skill is what the agent and the nightly
+   cron actually load, so it must be updated from the repo, never the reverse.
+   `SKILL.md` is the one exception: the skill copy carries a YAML frontmatter
+   (`name:` / `description:`) that the repo omits, so its **body** is synced while
+   the frontmatter is preserved.
+3. **Run the gate:** `scripts/release.sh check`. It refuses to pass until
+   repo↔skill files are byte-identical (SKILL body), `trace_extractor` is a single
+   source, version markers and OLLAMA_* loopback invariants hold, every script
+   parses, the loopback test passes and the tree is clean.
+4. **Tag + push:** `scripts/release.sh release vX.Y.Z "message"`, then create the
+   GitHub release.
+5. **ClawHub** is published by the operator, from the repo.
+
+### Known single-source exception
+
+`trace_extractor.py` exists in two places: the repo and
+`skills/trace-extractor/trace-extractor.py`. The skill copy is the **live** one
+(the cron uses it). The gate compares them and warns on divergence; port the live
+copy into the repo before tagging so they converge forward.
+
 ## Scripts
 
 ### 1. `trace_extractor.py` — Session extraction
