@@ -9,6 +9,14 @@ to **Ollama cloud** (`https://ollama.com`) when `OLLAMA_API_KEY` is configured.
 With no key it stays local; `TRACE_LLM_LOCAL_ONLY=1` refuses every cloud call. The
 destination is printed before each send. See the Security Notes below.
 
+> **⛔ MUST — releasing this skill.** Every change to this skill goes through
+> `scripts/release.sh`, without exception. A change is **not done** until
+> `scripts/release.sh check` passes green. Then, and only then, sync to the
+> installed skill and tag via `scripts/release.sh release vX.Y.Z "msg"`.
+> Never edit the installed skill directly. Never tag or publish on a red gate —
+> fix the drift or the invariant, never bypass the gate.
+> Pipeline: **local repo → installed skill → GitHub → ClawHub (manual).**
+
 ## Pipeline Overview
 
 ```

@@ -36,6 +36,12 @@ All scripts are standalone and composable. Run individually or as a pipeline.
 
 ## Release Pipeline (repo → skill → GitHub → ClawHub)
 
+> **MUST — every memory-skill change goes through `scripts/release.sh`.**
+> No exception. A change to `skills/memory-health/**` is not "done" until
+> `scripts/release.sh check` passes green. Do not tag, do not push a release,
+> do not hand anything to ClawHub before that. If the gate fails, fix the drift
+> or the invariant — never bypass the gate.
+
 One artifact, one direction, four stages. **Never edit the installed skill directly;
 never let the repo and the skill drift.**
 
