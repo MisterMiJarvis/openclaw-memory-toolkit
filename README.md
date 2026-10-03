@@ -1,12 +1,20 @@
 # 🧠 OpenClaw Memory Pipeline
 
 **Complete memory management pipeline for OpenClaw agents: extraction, archiving,
-scoring, consolidation, health monitoring, and hybrid search — all local-first.**
+scoring, consolidation, health monitoring, and hybrid search — local by default.**
 
-Five standalone Python scripts that form a complete memory lifecycle pipeline for
-[OpenClaw](https://github.com/openclaw/openclaw) agents. No external API dependencies
-(Ollama runs locally via HTTP, no cloud APIs)
-— works with any local LLM (Ollama, LM Studio, etc.) or fully without LLM in fallback mode.
+Seven standalone Python scripts that form a complete memory lifecycle pipeline for
+[OpenClaw](https://github.com/openclaw/openclaw) agents. Everything runs on this
+machine out of the box: Ollama over local HTTP, no cloud account, no paid dependency
+— works with any local LLM (Ollama, LM Studio, etc.) or fully without LLM in fallback
+mode.
+
+> **One exception, and it is opt-in:** `trace_extractor.py` can use **Ollama cloud**
+> (`https://ollama.com`) when an API key is configured, because that content leaves
+> the machine. With **no key configured it stays local**, and
+> **`TRACE_LLM_LOCAL_ONLY=1` refuses every cloud call outright**. Every run prints its
+> destination first (`[Security] ⚠️ CLOUD TRANSMISSION: …`). See
+> [Security Notes](#security-notes).
 
 Built for local-first OpenClaw setups (Ollama/GLM, nomic-embed-text).
 
@@ -20,7 +28,8 @@ Nightly Cron (23h)
   ├─ 3. scoring.py             # Score all memories with temporal decay
   ├─ 4. consolidate_advisor.py # Suggest consolidations (agent reviews)
   ├─ 5. conflict_resolver.py   # Arbitrate contradictory facts (NLI lifecycle)
-  └─ 6. memory_health.py       # Periodic health check (weekly)
+  ├─ 6. memory_health.py       # Periodic health check (weekly)
+  └─ 7. ontology_compact.py    # GC the ontology op-log (weekly)
 ```
 
 All scripts are standalone and composable. Run individually or as a pipeline.
@@ -120,7 +129,28 @@ python3 scripts/memory_health.py --fix        # Fix mode (DESTRUCTIVE)
 rewrites ontology file. Creates timestamped backup before modifying. Requires
 interactive confirmation or `--force` flag.
 
-### 6. `hybrid-search/hybrid_search.py` — Hybrid search engine
+### 6. `ontology_compact.py` — Ontology graph GC
+
+Compacts `memory/ontology/graph.jsonl` (an append-only operation log) by replaying
+it into a consolidated state: one line per active entity, superseded records dropped.
+
+**Safe by design**: backs up first (MD5-verified), writes to a temp file, validates
+that the entity set and contents are identical, and only then swaps in place. Skips
+entirely when the gain is below a threshold, so it is idempotent.
+
+```bash
+python3 scripts/ontology_compact.py --dry-run      # Report only
+python3 scripts/ontology_compact.py                # Compact (default threshold 5%)
+python3 scripts/ontology_compact.py --min-gain 10  # Skip unless >=10% smaller
+```
+
+**Output:** rewrites `memory/ontology/graph.jsonl` + a timestamped backup in
+`memory/ontology/backups/`.
+
+Typical gain on an op-log that has never been compacted: **~60-65%**.
+Run it weekly; between runs the file only grows by genuinely new operations.
+
+### 7. `hybrid-search/hybrid_search.py` — Hybrid search engine
 
 FTS5 (BM25) + sqlite-vec (cosine similarity) + Reciprocal Rank Fusion (k=60).
 
@@ -208,6 +238,8 @@ Environment variables with defaults:
 | `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
 | `CONFLICT_LLM_MODEL` | `glm-5.2` | Model for conflict arbitration (NLI) |
 | `MEMORY_DB` | `hybrid-search/agent_memory.db` | Path to the search/lifecycle DB |
+| `TRACE_LLM_LOCAL_ONLY` | _(unset)_ | Set to `1` to refuse cloud LLM calls and force local-only. **Recommended for any privacy-sensitive deployment.** |
+| `OLLAMA_API_KEY` | _(unset)_ | Enables **Ollama cloud** (`ollama.com`) in `trace_extractor.py`. Unset = local only |
 
 ## Requirements
 
@@ -232,6 +264,7 @@ python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl --apply --force
 
 # Weekly health check (Monday):
 python3 scripts/memory_health.py --quick
+python3 scripts/ontology_compact.py
 
 # Monthly deep check (manual):
 python3 scripts/memory_health.py --deep
@@ -239,7 +272,7 @@ python3 scripts/memory_health.py --deep
 
 ## Design Principles
 
-1. **Local-first** — no external API, no paid dependencies
+1. **Local by default** — no cloud account, no paid dependency. The single cloud-capable path is `trace_extractor.py` and it is opt-in via `OLLAMA_API_KEY`, disclosed on every run, and cancellable with `TRACE_LLM_LOCAL_ONLY=1`
 2. **Composable** — each script is standalone, can run independently
 3. **Safe by default** — dry-run available for all analysis scripts; `memory-health.py` is read-only by default. Some nightly cron commands modify files by default (archive, scores, consolidation report). Review cron commands before deploying.
 4. **Human-in-the-loop** — consolidation suggestions, not auto-merge
@@ -267,7 +300,8 @@ MIT — free to use, modify, and share.
 - ⚠️ **`--apply-promotions` modifies MEMORY.md**: `consolidate_advisor.py --apply-promotions` appends entries to MEMORY.md. Requires interactive confirmation or `--force` flag.
 - ⚠️ **Nightly cron modifies files by default**: `auto_archive.py` moves files, `scoring.py` writes `scores.json`, `consolidate_advisor.py` writes `consolidation_report.json`. Review cron commands before deploying.
 - ⚠️ **OLLAMA_URL restricted to localhost**: LLM calls send memory text to Ollama. URL validated to be `localhost`, `127.0.0.1`, or `::1` only — no remote hosts.
-- ⚠️ **PII sanitization before LLM calls**: `trace-extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` (regex-based removal of API keys, tokens, emails, passwords, PEM keys) before any LLM submission.
+- ⚠️ **Memory and session content IS transmitted to an LLM** (`trace_extractor.py`): extraction sends an excerpt of daily notes (and, with `--session-file`, session transcript text) to a language model. The **primary transport is Ollama cloud** (`https://ollama.com`) when an API key is configured — **content leaves this machine**. The local fallback is Ollama at `127.0.0.1:11434`, which keeps content on the machine. Set **`TRACE_LLM_LOCAL_ONLY=1`** to refuse every cloud call and force local-only operation. The destination is printed on each run (`[Security] ⚠️ CLOUD TRANSMISSION: …`).
+- ⚠️ **PII sanitization before LLM calls is best-effort, not a guarantee**: `trace_extractor.py` and `consolidate_advisor.py` sanitize text with `sanitize_pii()` — regex-based removal of API keys, tokens, JWTs, emails, passwords, PEM keys, French phone numbers and long opaque blobs — before any LLM submission. Regex scrubbing cannot catch every secret in an arbitrary format. **The transport decision is the primary control, not the filter.**
 - ⚠️ **Session transcripts are opt-in only**: `trace-extractor.py` no longer scans `~/.openclaw/agents/` globally. Use `--session-file <path>` to explicitly provide a single transcript file.
 - ⚠️ **`scores.json` stores hashes, not raw text**: `scoring.py` replaces note text with SHA256 hashes (first 16 chars) in all JSON output. File permissions set to `0o600`.
 - ⚠️ **Subprocess calls use fixed argument lists**: All `subprocess.run` calls use hardcoded `[sys.executable, ...]` argument lists — no environment variable injection. Script paths validated with `Path.resolve().is_relative_to(WORKSPACE)`.

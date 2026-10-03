@@ -64,6 +64,176 @@ Every change is local-first and read-only by default; nothing new leaves the mac
 `hybrid-search/schema.sql`, `hybrid-search/hybrid_search.py`, added
 `hybrid-search/conflict_resolver.py`; plus `README.md`, `SKILL.md`, `CHANGELOG.md`.
 
+## v2.2.2 — Disclosure That Matches the Transport (2026-10-02)
+
+Round 7, from the second SkillSpector run on the published v2.2.1 (54 findings).
+Most of the report is scanner triage already covered in
+`docs/SECURITY-AUDIT-NOTES.md`; **one finding was real, and it was one the scanner
+only half-saw**.
+
+### Fixed
+- **The transport disclosure lied about the transport** (`trace_extractor.py`):
+  `llm_destination()` — the function whose entire job is to warn the operator before
+  memory content leaves the machine — read **only** `os.environ["OLLAMA_API_KEY"]`,
+  while the actual sender, `get_ollama_api_key()`, also resolves the key from
+  `~/.openclaw/workspace/.secrets/ollama.json` and from `openclaw.json`.
+  Consequence: with the key in the secrets file — the common deployment — the banner
+  printed *"local Ollama … else local fallback"* and the content was then posted to
+  `https://ollama.com`. The warning was wrong **in exactly the configuration it
+  existed to protect**. This is worse than an undisclosed transmission: it is a
+  disclosure that actively misleads.
+  Both code paths now share one resolver, `_find_ollama_api_key_sources()`, which
+  returns `(source, key)` in one fixed precedence order. The banner names the source
+  (`key from env`, `key from secrets-file`, `key from config`) and `TRACE_LLM_LOCAL_ONLY=1`
+  short-circuits before any lookup.
+- **Intent/code divergence in the docs** (`README.md`, `SKILL.md`): the README opened
+  with "No external API dependencies (Ollama runs locally via HTTP, no cloud APIs)"
+  and the SKILL description ended with "zero external cloud API dependencies" — while
+  the extractor's **primary** transport was Ollama cloud. Six of the 54 findings are
+  this single contradiction. Both files now state the real posture: **local by
+  default, one opt-in cloud path**, with the switch and the warning documented at the
+  top, not buried.
+- **`--session-file` contradicted the confinement claim** (`SKILL.md`): the notes
+  asserted that every script stays inside `WORKSPACE/memory/`, but `--session-file`
+  deliberately accepts one absolute path outside it (a session transcript does not
+  live under `memory/`). The claim is now precise — documented as an explicit,
+  never-automatic exception rather than silently overstated. The same edit records the
+  three-file `ALLOWED_SCAN_FILES` allowlist so the stated scope equals the real scope.
+- **`OLLAMA_API_KEY` was missing from the configuration table** (`README.md`): the
+  variable that turns on the only cloud-capable path was undocumented.
+
+### Verified (executed, not read)
+- **The bug, reproduced then closed**: with no `OLLAMA_API_KEY` in the environment and
+  a key present in `.secrets/ollama.json`, the old `llm_destination()` returned
+  `('cloud', "…if a key is configured, else local fallback")` — ambiguous at best.
+  The patched version returns
+  `('cloud', 'Ollama cloud (ollama.com) — key from secrets-file — content leaves this machine')`.
+- **Local-only still wins**: `TRACE_LLM_LOCAL_ONLY=1` returns
+  `('local', 'local Ollama (127.0.0.1:11434) — forced by TRACE_LLM_LOCAL_ONLY')` before
+  any key lookup runs.
+- **Env override**: `OLLAMA_API_KEY` set returns `('cloud', '… — key from env — …')`.
+- `ast.parse()` clean on the modified module.
+
+### Documented (scanner false positives — not defects)
+- **Tainted flow `os.environ` → `urlopen`** in `consolidate_advisor.py` (~318) and
+  `trace_extractor.py` (~359): the first targets `OLLAMA_URL`, produced by
+  `get_safe_ollama_url()` and constrained to a loopback allowlist at import; the second
+  targets the literal `http://127.0.0.1:11434`. Loopback sinks, not exfiltration sinks.
+- **"Credential Access"** on `SECRET_SKIP_PATTERNS` / `SECRET_PATH_PATTERNS` and on the
+  markdown that documents them: a deny-list that names what it refuses is a control,
+  not a credential read. Firing on the prose of a fix is a category error.
+- **"Autonomous Decision Making"** in `auto_archive.py` / `consolidate_advisor.py`:
+  the scanner quotes the `if not sys.stdin.isatty(): return` guard as though it forced
+  the action. It is the human-in-the-loop branch.
+- Full dispositions: `docs/SECURITY-AUDIT-NOTES.md` §2.6.
+
+### Files Modified (4)
+`trace_extractor.py`, `README.md`, `SKILL.md`, `CHANGELOG.md`, plus
+`docs/SECURITY-AUDIT-NOTES.md`
+
+## v2.2.1 — Disclose the LLM Transport, Harden PII Scrubbing (2026-10-02)
+
+Closes the T09 finding raised by the ClawHub / SkillSpector scan on 2026-10-02:
+**"Undisclosed Cloud Transmission of Memory and Session Content"** in
+`trace_extractor.py`. The finding was valid. The extractor's primary transport is
+Ollama **cloud**, so memory and session text leaves the machine — and neither the
+code nor the docs said so, in a repository that advertises itself as local-first.
+
+### Fixed
+- **Undisclosed cloud transmission** (`trace_extractor.py`): the extraction path
+  posts to `https://ollama.com/api/chat` with a bearer key. Every run now prints its
+  destination before sending — `[Security] ⚠️ CLOUD TRANSMISSION: …` when the target
+  is cloud, `[Security] … (stays on this machine)` when it is local — via the new
+  `llm_destination()` helper.
+- **No local-only escape hatch**: added **`TRACE_LLM_LOCAL_ONLY=1`**, which makes
+  `call_ollama_cloud()` return early and refuses every cloud call. Local-only mode
+  cannot silently fail over to a transport that leaves the machine.
+- **`sanitize_pii()` gaps**: the filter was regex-only and missed secrets in uncommon
+  formats. Extended with JWTs (`eyJ…`), hex blobs ≥32 chars, base64 blobs ≥40 chars,
+  French phone numbers, card-like digit runs, `access_key`/`apikey` assignments and
+  OpenSSH private keys. The docstring now states plainly that scrubbing is
+  **best-effort, not a guarantee**, and that the transport decision is the primary
+  control. A "local-first, no cloud" claim is only as good as the transport behind it.
+
+### Docs
+- `README.md`, `SKILL.md`: the transmission, the destination, and the local-only
+  switch are now documented; the blanket "zero external cloud API" phrasing is
+  corrected where it did not hold for the extractor. `TRACE_LLM_LOCAL_ONLY` added to
+  the configuration table.
+- `docs/SECURITY-AUDIT-NOTES.md`: T09 recorded as a **closed real finding** (§1.0);
+  the two false-positive families it generated — tainted-flow at `urlopen` in
+  `trace_extractor.py` (§2.4) and credential-access hits on the secret deny-lists and
+  on the audit prose itself (§2.5) — are triaged with dispositions.
+
+### Verified (executed, not read)
+- `llm_destination()` returns `('local', …)` under `TRACE_LLM_LOCAL_ONLY=1`, and
+  `('cloud', "… content leaves this machine")` when `OLLAMA_API_KEY` is set.
+- `sanitize_pii()` redacts all six test classes: JWT, hex-32, base64-40, French phone
+  number, email, bearer token — 6/6.
+- Non-regression: ordinary note text survives (`version 2.1.4`, `exit code 1`
+  intact); only the embedded email is redacted.
+- `ast.parse()` clean on the modified module.
+
+### Acknowledgements
+T09 reported by the ClawHub security scan (SkillSpector). Fixed rather than argued.
+
+## v2.2.0 — Trace Extractor Ships, Ontology GC, Deterministic IDs (2026-10-02)
+
+First release that includes `trace_extractor.py` as a **shipped artifact** rather
+than a referenced-but-absent step, plus a long-overdue garbage collector for the
+ontology op-log. Two latent bugs in the extractor are fixed: IDs that were
+never stable across processes, and an "upsert" that physically appended.
+
+### Added
+- **`trace_extractor.py`** — the session/notes extractor is now published. It was
+  cited as step 1 of the documented pipeline since v2.0 but the file itself was
+  never in the repository, so cloning the toolkit gave you a README referencing a
+  script no one could run. Categories: decisions, errors, facts, patterns.
+- **`ontology_compact.py`** — garbage collector for `memory/ontology/graph.jsonl`.
+  The ontology file is an append-only operation log; nothing ever replayed it, so
+  the same entity was rewritten on every run and the file grew without bound.
+  The compactor replays the log into a consolidated state (one line per active
+  entity, superseded records dropped), backs up first, validates that the entity
+  set and contents are identical, and only then swaps in place. Idempotent: it
+  skips when the gain is below `--min-gain` (default 5%).
+
+### Fixed
+- **Non-deterministic entity IDs** (`trace_extractor.py`): decisions were keyed
+  with `hash(what) % 10000`. Python randomises `hash()` per process
+  (`PYTHONHASHSEED`), so the *same* decision produced a *different* ID on every
+  run. The `if entity_id not in existing_ids` guard could never fire — the ID was
+  always new — and the guard's own premise (ID identifies content) was false.
+  Observed impact on a production workspace: one episode rewritten **38 times**
+  under 38 different IDs, 63 IDs duplicated 2–38×, 52% of all log lines redundant.
+  IDs now come from `stable_id()`, a SHA-256 prefix, stable across processes and
+  machines.
+- **`upsert` that appended** (`trace_extractor.py`): records were labelled
+  `"op": "upsert"` but written with `open(path, "a")`. The operation name
+  described an intent the code did not implement — an update was impossible, only
+  appends happened. Both writers now go through `upsert_entities()`, which reads
+  the current file, replaces matching entities in place, appends the rest, and
+  writes atomically via a temp file.
+
+### Verified (executed, not read)
+- **ID stability**: `stable_id()` called from three separate interpreter processes
+  returns the identical digest (`dec_20260629_4f0644cd`, `tl_20260613_873a194b`),
+  where the previous `hash()`-based scheme returned a different value each run.
+- **Real upsert**: on a two-entity file, updating an existing ID leaves the line
+  count unchanged and replaces the record; adding a new ID grows it by exactly one.
+- **Compactor on a production graph**: 742,364 → 272,518 bytes (−63%),
+  2,018 → 912 lines, 1,106 redundant lines dropped, and the reloaded entity set
+  compared equal to the pre-compaction state (912 active entities, 0 lost).
+- **Compactor idempotence**: re-run on the already-compacted file reports 0 lines
+  dropped and writes nothing (gain below threshold).
+- **Syntax**: `ast.parse()` clean on both new scripts.
+
+### Notes
+- The ontology compactor pairs with the parser fix in the sibling release line:
+  `memory_health.py` and the index builder accept any record carrying an entity,
+  so a consolidated `"op": "state"` file and a raw operation log both index
+  correctly. Previously the indexer matched `op == "create"` only, which silently
+  indexed **zero** entities once a log had been compacted.
+
 ## v2.1.4 — Allowlist/Index Agreement, Both Directions (2026-09-27)
 
 Follow-up found by the v2.1.3 control pass. v2.1.3 fixed an allowlist that was
