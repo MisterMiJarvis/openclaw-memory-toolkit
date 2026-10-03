@@ -25,7 +25,7 @@ Nightly Cron (23h)
 
 All scripts are standalone and composable. Run individually or as a pipeline.
 
-## Fact lifecycle (v2.2.0)
+## Fact lifecycle (v3.0.0)
 
 The search DB no longer just accumulates facts: every fact carries a lifecycle
 (`active` / `superseded` / `disputed`) and only `active` facts are ever
@@ -234,6 +234,57 @@ Disable with `--no-temporal-boost`.
 **Requirements:** `sqlite-vec` (pip install in venv), Ollama with `nomic-embed-text`
 
 **Output:** `hybrid-search/agent_memory.db` — SQLite DB with FTS5 + vec0 indexes.
+
+### 8. `conflict_resolver.py` — Fact lifecycle & dispute resolution
+
+Four-step consistency pipeline over the search DB: **atomic extraction →
+targeted retrieval of concurrent `active` facts → NLI classification → traceable
+state update**. Only `active` facts are ever retrieved. A new fact that
+contradicts an active one supersedes it (`superseded_by` now written); a weak
+contradiction is escalated to `disputed` instead of silently destroying an
+established fact.
+
+```bash
+# Analyse one candidate fact (read-only)
+python3 hybrid-search/conflict_resolver.py check "On a migré la BDD sur MySQL 8" --subject serveur_prod
+
+# Batch arbitration from JSONL (dry-run; --apply to persist)
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl
+python3 hybrid-search/conflict_resolver.py arbitrate facts.jsonl --apply --force
+
+# What is waiting for a human? (cheap, deterministic)
+python3 hybrid-search/conflict_resolver.py pending
+
+# Lift the ambiguity explicitly
+python3 hybrid-search/conflict_resolver.py resolve 42 --confirm
+python3 hybrid-search/conflict_resolver.py resolve 42 --reject --replacement "corrected fact"
+```
+
+`--confirm` restores the wording to `active` **and supersedes any rival on the
+same subject**; `--reject [--replacement]` supersedes it and optionally inserts a
+corrected fact. Only `disputed` rows are eligible. `--no-llm` gives a
+conservative lexical fallback; the LLM endpoint is loopback-only.
+
+### 9. `compact.py` — Cold storage & lifecycle compaction
+
+Moves terminal facts (`superseded`, optionally `disputed`) out of the hot tables
+into a **cold archive** so FTS5/BM25 rank space and the vector index stop carrying
+dead rows while full traceability is kept.
+
+```bash
+python3 hybrid-search/compact.py --stats              # hot vs cold sizes
+python3 hybrid-search/compact.py --dry-run            # what would be archived
+python3 hybrid-search/compact.py --apply --min-age-days 30
+python3 hybrid-search/compact.py --restore 42         # rehydrate one fact
+```
+
+Rows are copied verbatim into `memories_archive` in the same SQLite file and
+appended to a dated JSONL audit under `memory/audit/`, then `DELETE`d from the hot
+table (fires the triggers → removed from FTS5 and `memories_vec`). **Never a hard
+delete of data, only a move.** Dry-run is the default; mutation requires
+`--apply`; a retention guard refuses rows newer than `--min-age-days`; the DB is
+backed up via SQLite's `backup()` API and MD5-checked before any write. Requires
+`sqlite-vec` (the vec0 delete trigger fires on `DELETE`).
 
 ## Ontology
 

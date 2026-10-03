@@ -2,6 +2,34 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.0.1 — SKILL.md Actually Ships the v3.0.0 Content (2026-10-03)
+
+Documentation-only fix. v3.0.0 shipped correct code, CHANGELOG and README, but
+`SKILL.md` — the file ClawHub renders and users read first — was never actually
+updated. The v3.0.0 commit message claimed "SKILL/README/CHANGELOG updated"; on
+`SKILL.md` the edit was a silent no-op (an identical-replacement), and it was not
+re-verified before commit. The published skill therefore advertised `v2.2.0` in
+its lifecycle heading and documented none of the new commands.
+
+### Fixed
+- `SKILL.md` lifecycle heading is now `v3.0.0`.
+- Added the two missing Scripts entries:
+  - **8. `conflict_resolver.py`** — the four-step NLI pipeline, `check` /
+    `arbitrate`, `pending` (surface unresolved disputes) and `resolve --confirm`
+    / `--reject [--replacement]` (only `disputed` rows eligible; `--confirm`
+    supersedes rivals on the same subject).
+  - **9. `compact.py`** — cold-storage compaction: `--stats`, `--dry-run`
+    default, `--apply --min-age-days N`, `--restore <id>`; archive table +
+    JSONL audit, hot-table DELETE so FTS5/vector indexes drop the rows; requires
+    `sqlite-vec`.
+- `SKILL.md` grew 343 → 394 lines.
+
+### Process lesson
+An `edit` that reports "no changes made (replacement text is identical)" is a
+**failure signal for that edit**, not a success. The version marker and the new
+sections are now grep-verified against the file, both locally and against the
+pushed remote, before claiming the docs are updated.
+
 ## v3.0.0 — Cold Storage & Interactive Dispute Resolution (2026-10-03)
 
 Major version: the fact lifecycle introduced below is now complete end-to-end —
