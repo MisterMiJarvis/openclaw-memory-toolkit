@@ -712,15 +712,16 @@ def collect_all_files() -> list[dict]:
             "score": 0.3,
         })
 
-    # ── Archive files — episodic layer ──
+    # ── Archive files — episodic layer (RECURSIVE: archives live in
+    #      month/themed sub-folders, e.g. archive/2026-07/2026-07-15.md) ──
     archive_dir = os.path.join(WORKSPACE, "memory", "archive")
-    archive_files = sorted(glob.glob(os.path.join(archive_dir, "*.md")))
+    archive_files = sorted(glob.glob(os.path.join(archive_dir, "**", "*.md"), recursive=True))
     for f in archive_files:
         files.append({
             "path": f,
             "category": "archive",
             "layer": "episodic",
-            "source": f"archive/{os.path.basename(f)}",
+            "source": "archive/" + os.path.relpath(f, archive_dir),
             "score": 0.1,
         })
 
