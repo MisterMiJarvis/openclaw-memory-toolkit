@@ -65,7 +65,8 @@ fi
 
 echo "== 3. version markers agree =="
 V_CHANGELOG="$(grep -m1 '^## v' CHANGELOG.md | sed -E 's/^## (v[0-9.]+).*/\1/')"
-V_SKILL="$(grep -m1 -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' SKILL.md || true)"
+V_SKILL="$(grep -o 'current release v[0-9]\+\.[0-9]\+\.[0-9]\+' SKILL.md | head -1 | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' || true)"
+[ -z "$V_SKILL" ] && V_SKILL="$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' SKILL.md | head -1 || true)"
 [ -n "$V_CHANGELOG" ] && ok "CHANGELOG latest: $V_CHANGELOG" || bad "no version in CHANGELOG.md"
 if [ -n "$V_SKILL" ]; then
   if [ "$V_SKILL" = "$V_CHANGELOG" ]; then ok "SKILL.md marker matches: $V_SKILL"
