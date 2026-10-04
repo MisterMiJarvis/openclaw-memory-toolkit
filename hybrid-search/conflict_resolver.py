@@ -385,10 +385,16 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
 # ─── High-level flows ─────────────────────────────────────────────────────────
 
 def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
-               use_llm: bool = True, apply: bool = False) -> list[dict]:
-    """Run the full pipeline for one (possibly compound) new statement."""
+               use_llm: bool = True, apply: bool = False,
+               split: bool = True) -> list[dict]:
+    """Run the full pipeline for one (possibly compound) new statement.
+
+    split=False trusts the caller to have supplied an already-atomic fact
+    (e.g. auto_capture.py's LLM extractor). This avoids re-splitting on
+    punctuation that is part of a value, such as 'Ubuntu 24.04'.
+    """
     results = []
-    for fact in extract_atomic(text):
+    for fact in (extract_atomic(text) if split else [text.strip()]):
         candidates = fetch_active_facts(conn, subject, fact)
         best = None
         for cand in candidates:
@@ -428,7 +434,8 @@ def cmd_check(args):
     if added:
         print(f"🔧 migrated schema: added {', '.join(added)}")
     res = check_fact(conn, args.text, args.subject,
-                     use_llm=not args.no_llm, apply=args.apply)
+                     use_llm=not args.no_llm, apply=args.apply,
+                     split=not args.no_split)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     if not args.apply:
         print("\n(analyse only — pass --apply to mutate the DB)")
@@ -462,7 +469,8 @@ def cmd_arbitrate(args):
         content = obj.get("content") or obj.get("fact") or ""
         subject = obj.get("subject") or args.subject
         results = check_fact(conn, content, subject,
-                             use_llm=not args.no_llm, apply=args.apply)
+                             use_llm=not args.no_llm, apply=args.apply,
+                             split=not args.no_split)
         for r in results:
             act = (r.get("action") or {}).get("action")
             if act in summary:
@@ -621,6 +629,8 @@ def main():
     c.add_argument("--subject", help="Entity the fact is about (e.g. serveur_prod)")
     c.add_argument("--no-llm", action="store_true", help="Skip LLM, use lexical heuristic")
     c.add_argument("--apply", action="store_true", help="Persist the resolution (mutates DB)")
+    c.add_argument("--no-split", action="store_true",
+                   help="Treat the fact as already atomic (no punctuation split)")
     c.set_defaults(func=cmd_check)
 
     a = sub.add_parser("arbitrate", help="Arbitrate a JSONL batch of facts")
@@ -629,6 +639,8 @@ def main():
     a.add_argument("--no-llm", action="store_true", help="Skip LLM, use lexical heuristic")
     a.add_argument("--apply", action="store_true", help="Persist resolutions (mutates DB)")
     a.add_argument("--force", action="store_true", help="Required with --apply in non-interactive mode")
+    a.add_argument("--no-split", action="store_true",
+                   help="Facts are already atomic (no punctuation split)")
     a.set_defaults(func=cmd_arbitrate)
 
     l = sub.add_parser("lifecycle", help="List facts by lifecycle status")

@@ -30,6 +30,7 @@ SYNC_FILES=(
   hybrid-search/hybrid_search.py hybrid-search/compact.py
   hybrid-search/conflict_resolver.py hybrid-search/schema.sql
   hybrid-search/test_loopback_guard.py docs/SECURITY-AUDIT-NOTES.md
+  hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
 )
 
 echo "== 1. repo <-> skill sync =="

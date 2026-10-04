@@ -2,6 +2,37 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.2.0 — Auto-Capture: Session Dialogue → Arbitrated Facts (2026-10-04)
+
+Feature release. Adds the write-behind half of the autonomous memory loop: a
+post-turn pipeline that reads session dialogue, extracts atomic durable facts
+with a local LLM, and arbitrates them against existing memory (superseding or
+flagging contradictions). Complementary to the existing nightly indexer, which
+only archives/indexes daily notes and never arbitrates.
+
+### Added
+- **`hybrid-search/auto_capture.py`** — post-turn fact extraction. Gating
+  (regex/length) skips trivial exchanges before any LLM call; a local model
+  (`qwen2.5:3b` by default) returns atomic facts; results are handed to
+  `conflict_resolver.py`. Guards: local-only endpoint, user-anchored extraction
+  (echo-loop guard drops assistant speculation), subject anti-hallucination
+  (a subject must appear in the fact text or it is dropped), `--selftest`.
+- **`hybrid-search/transcript_adapter.py`** — reads the OpenClaw per-agent
+  session store (`agents/<agent>/agent/openclaw-agent.sqlite`,
+  `session_transcript_fts`) and emits `{user, assistant}` turns. Snapshot-first
+  (WAL-aware copy; the live DB is never touched), read-only, secret-redacting.
+- **`--no-split`** flag on `conflict_resolver.py` `check`/`arbitrate`: treats an
+  already-atomic fact as-is, avoiding a punctuation split that broke values
+  like `Ubuntu 24.04` into two malformed facts.
+
+### Why
+- Legacy `sessions/*.jsonl` transcripts stopped being written (OpenClaw migrated
+  session storage to SQLite). A cron reading them would run green nightly while
+  capturing nothing. The adapter reads the authoritative store the CLI itself
+  uses.
+- `conflict_resolver.py` had 3100 facts all `active` with no subject: the
+  lifecycle/arbitration path had never been exercised. Auto-Capture feeds it.
+
 ## v3.1.1 — README Split: Contributing Moved Out (2026-10-03)
 
 Documentation-only release. No behaviour change to any script.

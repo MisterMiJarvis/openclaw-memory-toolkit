@@ -26,6 +26,7 @@ FILES=(
   hybrid-search/hybrid_search.py hybrid-search/compact.py
   hybrid-search/conflict_resolver.py hybrid-search/schema.sql
   hybrid-search/test_loopback_guard.py
+  hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
   docs/SECURITY-AUDIT-NOTES.md
   scripts/release.sh
 )
