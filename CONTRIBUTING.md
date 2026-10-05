@@ -35,6 +35,21 @@ never let the repo and the skill drift.**
    GitHub release.
 5. **ClawHub** is published by the operator, from the repo.
 
+> **MUST — every release updates the CHANGELOG *and* the README.** The operator
+> asked for this explicitly (2026-10-05): a release is not just a tag. Before
+> tagging, always:
+> - **CHANGELOG.md** — add a new entry at the top: `## vX.Y.Z — <title> (<date>)`
+>   with `### Added` / `### Changed` / `### Fixed` sections as applicable. Cite
+>   the cause, not just the change (what broke, why, how it was found). Never
+>   rewrite history: correct an older entry only to fix a factual error.
+> - **README.md** — update anything the release makes stale: version numbers,
+>   recommended models, new scripts, changed flags, requirements.
+> - **SKILL.md** — bump the `current release vX.Y.Z` marker so the gate's
+>   version-markers check passes.
+>
+> Skipping either document leaves GitHub showing a release nobody can read.
+> This is part of "done", exactly like the green gate.
+
 ## Known single-source exception
 
 `trace_extractor.py` exists in two places: the repo and
