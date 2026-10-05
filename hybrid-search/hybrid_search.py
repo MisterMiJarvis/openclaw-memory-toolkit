@@ -313,6 +313,13 @@ class HybridMemoryStore:
     def __init__(self, db_path: str = DB_PATH, schema_path: str = SCHEMA_PATH):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
+        # C3/C1 — multi-process safety (read MCP/RRF vs async write hook):
+        #   busy_timeout : wait up to 5s on a locked DB instead of crashing
+        #   journal_mode : WAL lets readers and one writer coexist
+        #   foreign_keys : the engine enforces the superseded_by FK itself
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.enable_load_extension(True)
         self.conn.load_extension(sqlite_vec.loadable_path())
         self.conn.enable_load_extension(False)
@@ -325,20 +332,37 @@ class HybridMemoryStore:
         self.conn.commit()
 
     def add_memory(self, content: str, category: str = "general", layer: str = "episodic",
-                   source: str = "", score: float = 0.0, embedding: list[float] = None) -> int:
-        """Add a memory chunk with optional pre-computed embedding."""
+                   source: str = "", score: float = 0.0, embedding: list[float] = None,
+                   subject: str = None) -> int:
+        """Add a memory chunk with an optional pre-computed embedding and subject.
+
+        C4: the hot row and its vector row are inserted in ONE transaction. If the
+        vec INSERT fails (bad dimension, disk full), the hot row is rolled back —
+        otherwise the DB would hold a fact with no embedding, invisible to vector
+        search while still visible to FTS5 (silent index drift).
+
+        M4: `subject` is the entity key used by conflict arbitration. It used to be
+        impossible to set at all from this path (the column was absent from the
+        INSERT), which is why 100% of facts had subject=NULL.
+        """
         if embedding is None:
             embedding = get_embedding(content[:2000])
-        cur = self.conn.execute(
-            "INSERT INTO memories (content, category, layer, source, score) VALUES (?, ?, ?, ?, ?)",
-            (content, category, layer, source, score)
-        )
-        mem_id = cur.lastrowid
-        self.conn.execute(
-            "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
-            (mem_id, serialize_f32(embedding))
-        )
-        self.conn.commit()
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.execute(
+                "INSERT INTO memories (content, category, layer, source, score, subject) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (content, category, layer, source, score, subject)
+            )
+            mem_id = cur.lastrowid
+            self.conn.execute(
+                "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
+                (mem_id, serialize_f32(embedding))
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return mem_id
 
     def delete_by_source(self, source: str) -> int:
@@ -610,6 +634,11 @@ def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
     Incremental: any existing chunks for this source are removed first, so a
     re-index of a changed file replaces its old chunks instead of duplicating
     them. Freshness is decided by cmd_index via source_freshness().
+
+    M4: `subject` is derived from the SOURCE stem (e.g. "2026-10-05.md" -> None,
+    but "kavita-server.md" -> "kavita_server"). Daily notes stay subjectless on
+    purpose — they are episodic chunks, not atomic facts — while named/semantic
+    files get a stable, non-invented key so arbitration has an anchor to use.
     """
     store.delete_by_source(source)
     try:
@@ -624,6 +653,7 @@ def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
     if not content.strip():
         return (0, 0)
 
+    subject = derive_subject(source, category)
     chunks = chunk_text(content, max_chars=2000)
     chunks = cap_chunks(chunks)
 
@@ -634,7 +664,8 @@ def index_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
             embedding = get_embedding(chunk[:2000])
             store.add_memory(
                 content=chunk, category=category, layer=layer,
-                source=source, score=base_score, embedding=embedding
+                source=source, score=base_score, embedding=embedding,
+                subject=subject,
             )
             indexed += 1
             if delay > 0:
@@ -656,6 +687,31 @@ def source_freshness(store: "HybridMemoryStore") -> dict:
         "SELECT source, MAX(created_at) FROM memories GROUP BY source"
     ).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+def derive_subject(source: str, category: str = "") -> str | None:
+    """Derive a stable, non-invented subject key from a source path.
+
+    M4: subject was structurally impossible to set from the indexer, so 100% of
+    facts had subject=NULL and arbitration fell back to brittle lexical overlap.
+    This maps a source to a deterministic key:
+      * daily notes (2026-*.md)          -> None (episodic chunks, not facts)
+      * archive/*                        -> None (historical, not arbitrated)
+      * MEMORY.md / TOOLS.md             -> the stem, lowercased
+      * named semantic files             -> stem with '-'/'.' -> '_'
+    The key is derived from the filename, never guessed by a model, so it cannot
+    hallucinate. Returns None when the source carries no arbitrable identity.
+    """
+    base = os.path.basename(source)
+    stem = base.rsplit(".", 1)[0]
+    # Daily notes and archives stay subjectless: they are chunks of a log, not
+    # atomic assertions about one entity.
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", stem) or "archive/" in source:
+        return None
+    if not stem:
+        return None
+    key = re.sub(r"[^\w]+", "_", stem.lower()).strip("_")
+    return key or None
 
 
 def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
@@ -703,9 +759,17 @@ def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer:
                     skipped += 1
                     continue
                 embedding = get_embedding(content[:2000])
+                # M4: ontology nodes carry an id/type we can use as a real
+                # subject; fall back to the file-derived key otherwise.
+                node_subject = derive_subject(source, category)
+                raw_id = entity.get("id") or props.get("name")
+                if isinstance(raw_id, str) and raw_id.strip():
+                    cand = re.sub(r"[^\w]+", "_", raw_id.strip().lower()).strip("_")
+                    node_subject = cand or node_subject
                 store.add_memory(
                     content=content, category=category, layer=layer,
-                    source=source, score=base_score, embedding=embedding
+                    source=source, score=base_score, embedding=embedding,
+                    subject=node_subject,
                 )
                 indexed += 1
                 if delay > 0:

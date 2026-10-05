@@ -2,6 +2,77 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.3.0 — Referential Integrity, Transactional Writes, Ontology→DB Sync (2026-10-05)
+
+Hardening release. An audit of the fact-lifecycle layer found that the schema
+*declared* a state machine (status, confidence, superseded_by) the engine never
+enforced, that the write paths were not atomic, and that subject arbitration was
+dead in practice (100 % of indexed facts had `subject = NULL`). Every defect is
+fixed at the source and verified against the real database.
+
+### Fixed
+- **Schema now enforces what it declared (C1).** `status` carries a `CHECK
+  (status IN ('active','superseded','disputed'))`, `confidence` a range `CHECK`,
+  and `superseded_by` a `FOREIGN KEY … ON DELETE SET NULL`. Previously an
+  out-of-range status or a dangling referent was silently accepted. Verified by
+  negative tests: invalid status, `confidence = 5` and a broken referent are all
+  rejected by the engine.
+- **`conflict_resolver.apply_resolution()` is atomic (C2).** It ran its UPDATE
+  (supersede) and its INSERT (successor) as separate statements; a crash between
+  them left a fact superseded by nothing — silently lost. The whole resolution is
+  now one `BEGIN IMMEDIATE` … `COMMIT` with rollback.
+- **Concurrent access is safe (C3).** Both connection paths (`HybridMemoryStore`
+  and the resolver's `connect()`) now set `busy_timeout=5000`, `journal_mode=WAL`
+  and `foreign_keys=ON`. The async capture hook, the resolver and RRF reads can
+  now run in parallel instead of colliding on a locked DB.
+- **`add_memory()` writes the hot row and its vector atomically (C4).** A failure
+  between the two INSERTs used to leave a fact with no embedding — invisible to
+  vector search, still visible to FTS5 (silent index drift). Both INSERTs now
+  share one transaction and roll back together.
+- **`compact.py` never archives a still-referenced fact (M2).** A terminal row
+  that another hot row points at via `superseded_by` is now held back, so
+  archiving cannot dangle a live reference. Verified on a `1←2←3` chain.
+- **`ontology_compact.py` drops orphan relations (M3).** Relations touching a
+  superseded/absent entity used to survive compaction as orphan edges. They are
+  now dropped and reported (`relations: N kept, M orphan(s) dropped`).
+
+### Added
+- **`subject` is finally writable and populated (M4).** The column existed since
+  v2.2.0 but no write path could set it, so **100 % of facts had `subject = NULL`**
+  and conflict arbitration fell back to brittle lexical overlap. `add_memory()`
+  now accepts `subject`; the indexer derives a **deterministic, never-invented**
+  key from the source (`derive_subject()`), and ontology nodes use their own
+  entity id. Arbitrable fact categories now sit at **100 % subject coverage**
+  (daily notes and archives stay subjectless by design — they are episodic logs,
+  not atomic assertions).
+- **Ontology → DB synchronisation (v3.3 causality link).** `ontology_compact.py`
+  now mirrors a compaction into the hot DB: every entity that leaves the reference
+  nomenclature (`graph.jsonl`) has its facts marked `superseded` in the same run.
+  The set is the **diff between the pre- and post-compaction live sets**, so
+  entities that simply vanish are caught — not only explicit `supersede` ops.
+  Best-effort: a missing/locked DB never aborts a successful graph compaction.
+- **`migrate_subject.py` / `migrate_ontology_subjects.py`** — one-shot, idempotent
+  backfill/audit tools, kept in the repo (not installed in the skill). They are
+  what surfaced and repaired the two M4 defects below.
+- **`docs/AUDIT-v3.2.md`** — the reference audit that catalogued C1–C4, M2–M4.
+
+### Changed
+- **Auto-capture subject anti-hallucination relaxed (M4).** The old rule dropped
+  any subject whose tokens did not *all* appear in the fact (`« Serveur Prod »` →
+  tokens `serveur`,`prod`; only `serveur` grounded, so the whole key was thrown
+  away). It now keeps the subject if **any** token is grounded (preferring the
+  grounded token) and falls back to the fact's first substantial word. A subject
+  that grounds nothing is still dropped.
+
+### Data maintenance (real database, 2026-10-05)
+- **898 ontology rows relabelled.** The filename-derived migration had collapsed
+  898 distinct entities under one generic `subject = 'graph'`, which would have
+  made arbitration fetch an absurd mix. Re-mapped to each entity's real id: **209
+  survivors** got their live id, **689 ghosts** (entities absent from the compacted
+  ontology) were moved to `superseded`, then their stale `subject` cleared.
+- **Backups verified before every write** (`integrity_check: ok`), and post-run
+  `foreign_key_check` clean.
+
 ## v3.2.1 — Ontology Reindex, Number-Safe Splitting, Local Model Bump (2026-10-05)
 
 Maintenance release. Two defects found during the first live Auto-Capture

@@ -116,6 +116,11 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
         )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # C1/C3 — same trio as HybridMemoryStore: the resolver writes concurrently
+    # with the async capture hook and RRF reads, so it needs the same guard.
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -353,45 +358,56 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     ts = now_iso()
     action = {"relation": rel, "confidence": conf, "existing_id": existing_id}
 
-    if rel == CONTRADICTION:
-        if conf < DISPUTE_CONFIDENCE_FLOOR:
-            # Weak signal: never destroy a truth on a guess.
+    # C2 — the whole resolution is ONE atomic unit. Without this, a crash after the
+    # UPDATE that sets status='superseded' but before its successor is inserted
+    # would leave a fact superseded by nothing: silently lost. BEGIN IMMEDIATE
+    # takes the write lock up front so the sequence cannot interleave with the
+    # async capture hook.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        if rel == CONTRADICTION:
+            if conf < DISPUTE_CONFIDENCE_FLOOR:
+                # Weak signal: never destroy a truth on a guess.
+                conn.execute(
+                    "UPDATE memories SET status='disputed', updated_at=? WHERE id=?",
+                    (ts, existing_id),
+                )
+                new_id = _insert_fact(conn, new_fact, subject, "active", conf,
+                                      source, source_context, ts)
+                action.update(action="disputed", new_id=new_id,
+                              note="weak contradiction -> old=disputed, new=active")
+            else:
+                new_id = _insert_fact(conn, new_fact, subject, "active", conf,
+                                      source, source_context, ts)
+                conn.execute(
+                    "UPDATE memories SET status='superseded', superseded_by=?, "
+                    "updated_at=? WHERE id=?",
+                    (new_id, ts, existing_id),
+                )
+                action.update(action="superseded", new_id=new_id,
+                              note="old marked superseded, new inserted active")
+
+        elif rel == REDUNDANT:
+            row = conn.execute(
+                "SELECT confidence FROM memories WHERE id=?", (existing_id,)
+            ).fetchone()
+            old_conf = (row["confidence"] if row and row["confidence"] is not None else 0.5)
             conn.execute(
-                "UPDATE memories SET status='disputed', updated_at=? WHERE id=?",
-                (ts, existing_id),
+                "UPDATE memories SET last_confirmed=?, confidence=?, updated_at=? WHERE id=?",
+                (ts, min(1.0, old_conf + 0.1), ts, existing_id),
             )
+            action.update(action="confirmed", note="no duplicate; confidence bumped")
+
+        else:  # COMPATIBLE / ADDITION
             new_id = _insert_fact(conn, new_fact, subject, "active", conf,
                                   source, source_context, ts)
-            action.update(action="disputed", new_id=new_id,
-                          note="weak contradiction -> old=disputed, new=active")
-        else:
-            new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                  source, source_context, ts)
-            conn.execute(
-                "UPDATE memories SET status='superseded', superseded_by=?, "
-                "updated_at=? WHERE id=?",
-                (new_id, ts, existing_id),
-            )
-            action.update(action="superseded", new_id=new_id,
-                          note="old marked superseded, new inserted active")
+            action.update(action="added", new_id=new_id, note="compatible addition")
 
-    elif rel == REDUNDANT:
-        row = conn.execute(
-            "SELECT confidence FROM memories WHERE id=?", (existing_id,)
-        ).fetchone()
-        old_conf = (row["confidence"] if row and row["confidence"] is not None else 0.5)
-        conn.execute(
-            "UPDATE memories SET last_confirmed=?, confidence=?, updated_at=? WHERE id=?",
-            (ts, min(1.0, old_conf + 0.1), ts, existing_id),
-        )
-        action.update(action="confirmed", note="no duplicate; confidence bumped")
-
-    else:  # COMPATIBLE / ADDITION
-        new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                              source, source_context, ts)
-        action.update(action="added", new_id=new_id, note="compatible addition")
-
-    conn.commit()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return action
 
 

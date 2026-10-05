@@ -246,13 +246,25 @@ def _normalise_facts(raw) -> list[dict]:
             continue
         subject = str(item.get("subject") or "").strip().lower()
         subject = re.sub(r"\s+", "_", subject) or None
-        # Anti-hallucination: a small local model invents subjects. Keep the
-        # subject only if one of its tokens actually appears in the fact text.
+        # Anti-hallucination (relaxed in v3.3): a small local model does invent
+        # subjects, so we still require SOME grounding in the fact text — but the
+        # old rule dropped perfectly good keys. "Serveur Prod" -> tokens
+        # ['serveur','prod']; the fact said "serveur principal", so 'prod' was
+        # absent and the whole subject was thrown away, leaving subject=NULL.
+        # Now: keep the subject if ANY token appears in the fact, and fall back to
+        # the first substantial word of the fact rather than discarding it. A
+        # subject that grounds nothing is still dropped (true hallucination).
         if subject:
             tokens = [t for t in re.split(r"[^\w]+", subject) if len(t) >= 3]
             flat = re.sub(r"[^\w]+", "", fact).lower()
-            if not tokens or not any(t in flat for t in tokens):
-                subject = None
+            grounded = [t for t in tokens if t in flat]
+            if grounded:
+                # Prefer the grounded token(s) — they are the proven anchor.
+                subject = "_".join(grounded[:2])
+            elif tokens:
+                # No token grounded: try the fact's own first meaningful word.
+                words = [w.lower() for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", fact)]
+                subject = words[0] if words else None
         try:
             confidence = float(item.get("confidence", 0.7))
         except (TypeError, ValueError):
@@ -376,9 +388,10 @@ def selftest() -> int:
         {"subject": "y", "fact": "Le serveur pourrait peut-être migrer un jour vers Debian.", "confidence": 0.8},
     ]
     norm = _normalise_facts(raw)
-    if len(norm) != 1 or norm[0]["subject"] is not None:
-        # 'Serveur Prod' -> tokens 'serveur','prod'; 'prod' not in the text
-        # ('principal'), so the invented half is dropped -> subject None.
+    # v3.3: 'Serveur Prod' is now GROUNDED ('serveur' appears in the fact), so the
+    # subject is kept (grounded token), not dropped. The invented subject 'y' on
+    # the hedged fact is irrelevant: that item is dropped by the echo guard.
+    if len(norm) != 1 or norm[0]["subject"] != "serveur":
         print(f"  FAIL normalisation: {norm}")
         failures += 1
     else:

@@ -142,12 +142,30 @@ def select_terminal(conn: sqlite3.Connection, statuses: list[str],
     """
     cutoff = cutoff_iso(min_age_days)
     placeholders = ",".join("?" for _ in statuses)
+    # M2 — never archive a fact that a *hot* fact still points at. If we moved a
+    # `superseded_by` target to the cold table, the live reference would dangle:
+    # with FK now ON, the DELETE would raise; before v3.3 it silently broke the
+    # chain. Excluding referents here keeps the hot table self-consistent and
+    # defers that row until its referrer is itself terminal/aged enough.
     sql = (
         f"SELECT * FROM memories WHERE status IN ({placeholders}) "
         f"AND COALESCE(updated_at, created_at, '9999') < ? "
+        f"AND id NOT IN (SELECT superseded_by FROM memories "
+        f"                 WHERE superseded_by IS NOT NULL) "
         f"ORDER BY id"
     )
-    return conn.execute(sql, (*statuses, cutoff)).fetchall()
+    rows = conn.execute(sql, (*statuses, cutoff)).fetchall()
+    if rows:
+        held = conn.execute(
+            f"SELECT COUNT(*) FROM memories WHERE status IN ({placeholders}) "
+            f"AND COALESCE(updated_at, created_at, '9999') < ? "
+            f"AND id IN (SELECT superseded_by FROM memories "
+            f"             WHERE superseded_by IS NOT NULL)",
+            (*statuses, cutoff),
+        ).fetchone()[0]
+        if held:
+            print(f"  held back: {held} terminal fact(s) still referenced by a hot superseded_by")
+    return rows
 
 
 def write_audit(rows: list[sqlite3.Row], reason: str) -> Path:
@@ -204,13 +222,20 @@ def do_compact(conn: sqlite3.Connection, statuses: list[str], min_age_days: int,
     placeholders = ", ".join("?" for _ in FACT_COLUMNS)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         for r in rows:
             values = [r[c] if c in r.keys() else None for c in FACT_COLUMNS]
             conn.execute(
                 f"INSERT OR REPLACE INTO memories_archive ({cols}, archived_at, archive_reason) "
                 f"VALUES ({placeholders}, ?, ?)",
                 (*values, now, reason),
+            )
+            # Neutralise the FK *before* deleting the referent: a row can be
+            # terminal and still be the target of another row's superseded_by
+            # (e.g. a 3-step chain A<-B<-C where C is archived first). Clearing
+            # the dangling pointer keeps the chain readable and honours the FK.
+            conn.execute(
+                "UPDATE memories SET superseded_by=NULL WHERE superseded_by=?", (r["id"],)
             )
             conn.execute("DELETE FROM memories WHERE id=?", (r["id"],))
         conn.commit()
