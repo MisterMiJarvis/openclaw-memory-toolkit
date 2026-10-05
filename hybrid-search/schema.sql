@@ -29,7 +29,16 @@ CREATE TABLE IF NOT EXISTS memories (
         CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
     valid_from TEXT DEFAULT NULL,          -- ISO timestamp, when the fact became true
     source_context TEXT DEFAULT NULL,      -- originating message/prompt (audit trail)
-    last_confirmed TEXT DEFAULT NULL       -- ISO timestamp of last redundant confirmation
+    last_confirmed TEXT DEFAULT NULL,      -- ISO timestamp of last redundant confirmation
+    -- ─── v3.4 point-in-time retrieval ───
+    superseded_at TEXT DEFAULT NULL        -- ISO timestamp, when this row STOPPED being
+                                           -- active (NULL while it is active). Distinct from
+                                           -- valid_from (when the fact became TRUE in the
+                                           -- world) and from updated_at (rewritten on every
+                                           -- touch, e.g. a REDUNDANT confirmation). This is
+                                           -- the one column that answers "what was known on
+                                           -- date D?": created_at <= D AND (still active at
+                                           -- D). See retrieval_as_of().
 );
 
 -- FTS5 virtual table (external content = memories)

@@ -175,6 +175,27 @@ python3 hybrid-search/hybrid_search.py search "project alpha"  # Hybrid search
 python3 hybrid-search/hybrid_search.py status                  # Index stats
 ```
 
+**Point-in-time retrieval (v3.4):** pass `--as-of YYYY-MM-DD` to `query`,
+`search` or `context` to reconstruct the facts visible on that **past** date —
+not what the index believes today. This is the difference between an
+As-Maintained view and a retrievable As-Built baseline: the ledger marks rows
+`superseded` (with a `superseded_at` timestamp) instead of deleting them, so the
+history is already there to replay.
+
+```bash
+# What did the agent know on 1 July? (bare date = end of that day)
+python3 hybrid-search/hybrid_search.py query "database backend" --as-of 2026-07-01
+
+# Reconstruct context as of a precise instant
+python3 hybrid-search/hybrid_search.py context "backup script" --as-of 2026-06-15T08:00:00
+```
+
+A fact created **after** the requested date is invisible; a fact still active on
+that date stays visible even if it was superseded later. Without `--as-of` the
+behaviour is unchanged (active facts only). _Limitation:_ `--as-of` cannot go
+back before the first indexing date, since no row predates it (`valid_from`
+carries historical *world* time, a separate axis).
+
 **Scope:** Only indexes files within `WORKSPACE/memory/` + `MEMORY.md` + `TOOLS.md` + self `SKILL.md`.
 Personal files (`USER.md`, `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are excluded.
 No sibling skill enumeration (`skills/*/SKILL.md` glob removed).

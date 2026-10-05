@@ -375,37 +375,70 @@ class HybridMemoryStore:
         self.conn.commit()
         return cur.rowcount
 
-    def search_lexical(self, query: str, limit: int = 20) -> list[dict]:
-        """BM25 lexical search via FTS5. Only active facts are returned."""
+    def _as_of_clause(self, as_of: str | None, alias: str = "m") -> tuple[str, tuple]:
+        """Build the point-in-time visibility predicate (v3.4).
+
+        as_of=None   -> current state: only 'active' facts (unchanged behaviour).
+        as_of=<date> -> reconstruct the state known on that date:
+            * the row must already exist   (created_at <= as_of)
+            * and still be visible then:   active now (superseded_at IS NULL or
+              after as_of) OR superseded after as_of.
+        Returns (sql_fragment, params). Dates are ISO strings, compared
+        lexicographically, which is exact for YYYY-MM-DD[THH:MM:SS].
+        """
+        if not as_of:
+            return (f"{alias}.status = 'active'", ())
+        # A bare date (YYYY-MM-DD) means "end of that day": a row created at
+        # '2026-07-01T10:00' must be visible as-of '2026-07-01'. Without this,
+        # lexicographic comparison would exclude it and the flag would quietly
+        # lie to the user. A full timestamp is used verbatim.
+        bound = as_of
+        if len(as_of) == 10:  # YYYY-MM-DD
+            bound = as_of + "T23:59:59"
+        cond = (
+            f"{alias}.created_at <= ? AND ("
+            f"  ({alias}.status = 'active' AND ({alias}.superseded_at IS NULL "
+            f"      OR {alias}.superseded_at > ?))"
+            f"  OR {alias}.superseded_at > ?"
+            f")"
+        )
+        return (cond, (bound, bound, bound))
+
+    def search_lexical(self, query: str, limit: int = 20,
+                       as_of: str | None = None) -> list[dict]:
+        """BM25 lexical search via FTS5. Active facts (or as-of snapshot)."""
         fts_query = clean_fts_query(query)
-        sql = """
+        vis, vparams = self._as_of_clause(as_of, "m")
+        sql = f"""
             SELECT m.id, m.content, m.source, m.category, m.layer,
                    bm25(memories_fts) AS rank
             FROM memories_fts
             JOIN memories m ON m.id = memories_fts.rowid
-            WHERE memories_fts MATCH ? AND m.status = 'active'
+            WHERE memories_fts MATCH ? AND {vis}
             ORDER BY rank
             LIMIT ?
         """
-        rows = self.conn.execute(sql, (fts_query, limit)).fetchall()
+        rows = self.conn.execute(sql, (fts_query, *vparams, limit)).fetchall()
         return [
             {"id": r[0], "content": r[1][:300], "source": r[2], "category": r[3],
              "layer": r[4], "bm25_score": r[5]}
             for r in rows
         ]
 
-    def search_vector(self, query: str, limit: int = 20) -> list[dict]:
-        """Vector cosine similarity search via sqlite-vec. Active facts only."""
+    def search_vector(self, query: str, limit: int = 20,
+                      as_of: str | None = None) -> list[dict]:
+        """Vector cosine similarity search via sqlite-vec (or as-of snapshot)."""
         query_emb = get_embedding(query)
-        sql = """
+        vis, vparams = self._as_of_clause(as_of, "m")
+        sql = f"""
             SELECT m.id, m.content, m.source, m.category, m.layer,
                    distance
             FROM memories_vec
             JOIN memories m ON m.id = memories_vec.rowid
-            WHERE embedding MATCH ? AND k = ? AND m.status = 'active'
+            WHERE embedding MATCH ? AND k = ? AND {vis}
             ORDER BY distance
         """
-        rows = self.conn.execute(sql, (serialize_f32(query_emb), limit)).fetchall()
+        rows = self.conn.execute(sql, (serialize_f32(query_emb), limit, *vparams)).fetchall()
         return [
             {"id": r[0], "content": r[1][:300], "source": r[2], "category": r[3],
              "layer": r[4], "vec_distance": r[5]}
@@ -414,11 +447,14 @@ class HybridMemoryStore:
 
     def search_hybrid(self, query: str, limit: int = 5, k: int = 60,
                       min_rrf_score: float = 0.015, temporal_boost: bool = True,
-                      max_tokens: int = 0) -> list[dict]:
+                      max_tokens: int = 0, as_of: str | None = None) -> list[dict]:
         """
         Reciprocal Rank Fusion (RRF).
         Combines lexical (BM25) and vector search results.
         Includes source deduplication: group by source file, return best chunk per file.
+
+        as_of: v3.4 point-in-time retrieval. When set (ISO date), both sub-searches
+        reconstruct the facts visible on that date instead of the current state.
 
         Gemini vigilance #1 — min_rrf_score: Filters out chunks that appear in neither
         top-20 list (RRF score < 0.015 = pure noise). Prevents context dilution.
@@ -429,8 +465,8 @@ class HybridMemoryStore:
         to recent facts when context conflicts.
         """
         pool_size = max(limit * 4, 20)
-        lexical_results = self.search_lexical(query, limit=pool_size)
-        vector_results = self.search_vector(query, limit=pool_size)
+        lexical_results = self.search_lexical(query, limit=pool_size, as_of=as_of)
+        vector_results = self.search_vector(query, limit=pool_size, as_of=as_of)
 
         # Build rank maps (1-indexed rank)
         lex_rank = {}
@@ -1042,10 +1078,13 @@ def cmd_query(args):
 
     store = HybridMemoryStore(DB_PATH, SCHEMA_PATH)
     top = args.top or 5
+    as_of = getattr(args, "as_of", None)
+    if as_of:
+        print(f"🕰️  as-of {as_of} — reconstructing facts visible on that date")
 
     if args.lexical_only:
         t0 = time.time()
-        results = store.search_lexical(args.text, limit=top)
+        results = store.search_lexical(args.text, limit=top, as_of=as_of)
         elapsed = time.time() - t0
         print(f"📝 LEXICAL (BM25) — {len(results)} results [{elapsed*1000:.1f}ms]")
         for i, r in enumerate(results):
@@ -1056,7 +1095,7 @@ def cmd_query(args):
                               "content": r["content"][:200]} for r in results], indent=2))
     elif args.vector_only:
         t0 = time.time()
-        results = store.search_vector(args.text, limit=top)
+        results = store.search_vector(args.text, limit=top, as_of=as_of)
         elapsed = time.time() - t0
         print(f"🔍 VECTOR (cosine) — {len(results)} results [{elapsed*1000:.1f}ms]")
         for i, r in enumerate(results):
@@ -1069,7 +1108,7 @@ def cmd_query(args):
         t0 = time.time()
         min_score = args.min_score if args.min_score is not None else 0.015
         temporal = not args.no_temporal_boost
-        results = store.search_hybrid(args.text, limit=top, min_rrf_score=min_score, temporal_boost=temporal)
+        results = store.search_hybrid(args.text, limit=top, min_rrf_score=min_score, temporal_boost=temporal, as_of=as_of)
         elapsed = time.time() - t0
         print(f"⚡ HYBRID (RRF k=60, min_score={min_score}, temporal_boost={temporal}) — {len(results)} results [{elapsed*1000:.1f}ms]")
         for i, r in enumerate(results):
@@ -1097,7 +1136,8 @@ def cmd_context(args):
     min_score = args.min_score if args.min_score is not None else 0.015
     results = store.search_hybrid(args.text, limit=args.top,
                                   min_rrf_score=min_score,
-                                  max_tokens=args.budget)
+                                  max_tokens=args.budget,
+                                  as_of=getattr(args, "as_of", None))
     core = [f.strip() for f in (args.core_fact or [])]
     block = render_context(results, budget=args.budget, core_facts=core or None)
     print(block)
@@ -1188,6 +1228,8 @@ def main():
     q_parser.add_argument("--min-score", type=float, default=None, help="Min RRF score (default: 0.015). Set 0 to disable.")
     q_parser.add_argument("--no-temporal-boost", action="store_true", help="Disable temporal decay boost")
     q_parser.add_argument("--max-tokens", type=int, default=0, help="Hard token budget (0 = unlimited)")
+    q_parser.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
+                          help="Point-in-time retrieval: reconstruct facts visible on that date (v3.4)")
 
     # search (alias for query)
     s_parser = subparsers.add_parser("search", help="Alias for query")
@@ -1199,6 +1241,8 @@ def main():
     s_parser.add_argument("--min-score", type=float, default=None, help="Min RRF score (default: 0.015). Set 0 to disable.")
     s_parser.add_argument("--no-temporal-boost", action="store_true", help="Disable temporal decay boost")
     s_parser.add_argument("--max-tokens", type=int, default=0, help="Hard token budget (0 = unlimited)")
+    s_parser.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
+                          help="Point-in-time retrieval: reconstruct facts visible on that date (v3.4)")
 
     # context (tagged injection payload)
     ctx_parser = subparsers.add_parser("context", help="Render a tagged <agent_memory> injection block")
@@ -1207,6 +1251,8 @@ def main():
     ctx_parser.add_argument("--budget", type=int, default=800, help="Max tokens for retrieved context (default: 800)")
     ctx_parser.add_argument("--core-fact", action="append", help="Repeatable: a trusted core fact to embed")
     ctx_parser.add_argument("--min-score", type=float, default=None, help="Min RRF score (default: 0.015)")
+    ctx_parser.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
+                            help="Point-in-time retrieval: reconstruct facts visible on that date (v3.4)")
 
     # stats
     subparsers.add_parser("stats", help="Show DB stats")

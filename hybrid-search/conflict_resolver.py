@@ -125,10 +125,12 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 
 def ensure_lifecycle_columns(conn: sqlite3.Connection) -> list[str]:
-    """Idempotent migration: add v2.2.0 lifecycle columns to an older DB.
+    """Idempotent migration: add lifecycle columns to an older DB.
 
     SQLite has no "ADD COLUMN IF NOT EXISTS"; we inspect PRAGMA table_info and
     add only the missing ones. Returns the list of columns actually added.
+    v3.4 adds `superseded_at` (point-in-time retrieval: when a row STOPPED being
+    active — see schema.sql).
     """
     wanted = {
         "subject": "TEXT DEFAULT NULL",
@@ -137,6 +139,7 @@ def ensure_lifecycle_columns(conn: sqlite3.Connection) -> list[str]:
         "valid_from": "TEXT DEFAULT NULL",
         "source_context": "TEXT DEFAULT NULL",
         "last_confirmed": "TEXT DEFAULT NULL",
+        "superseded_at": "TEXT DEFAULT NULL",
     }
     existing = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
     added = []
@@ -147,6 +150,9 @@ def ensure_lifecycle_columns(conn: sqlite3.Connection) -> list[str]:
     if added:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject)")
+        # v3.4: as-of queries filter on superseded_at alongside status.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_superseded_at "
+                     "ON memories(superseded_at)")
         conn.commit()
     return added
 
@@ -382,8 +388,8 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
                                       source, source_context, ts)
                 conn.execute(
                     "UPDATE memories SET status='superseded', superseded_by=?, "
-                    "updated_at=? WHERE id=?",
-                    (new_id, ts, existing_id),
+                    "updated_at=?, superseded_at=? WHERE id=?",
+                    (new_id, ts, ts, existing_id),
                 )
                 action.update(action="superseded", new_id=new_id,
                               note="old marked superseded, new inserted active")
@@ -639,8 +645,9 @@ def cmd_resolve(args):
         superseded = []
         for rival in rivals:
             conn.execute(
-                "UPDATE memories SET status='superseded', superseded_by=?, updated_at=? WHERE id=?",
-                (args.id, ts, rival["id"]),
+                "UPDATE memories SET status='superseded', superseded_by=?, updated_at=?, "
+                "superseded_at=? WHERE id=?",
+                (args.id, ts, ts, rival["id"]),
             )
             superseded.append(rival["id"])
         action = "confirmed"
@@ -648,8 +655,8 @@ def cmd_resolve(args):
                   "superseded_rivals": superseded}
     else:  # --reject
         conn.execute(
-            "UPDATE memories SET status='superseded', updated_at=? WHERE id=?",
-            (ts, args.id),
+            "UPDATE memories SET status='superseded', updated_at=?, superseded_at=? WHERE id=?",
+            (ts, ts, args.id),
         )
         new_id = None
         if args.replacement:

@@ -2,6 +2,56 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.4.0 — Point-in-Time Retrieval (`--as-of`) (2026-10-05)
+
+Feature release. Turns the fact-lifecycle ledger into a time machine: the search
+can now reconstruct the exact cognitive state the agent had **on a past date**,
+not just what it believes today. In PLM terms, this is the step from a single
+"As-Maintained" configuration to a retrievable "As-Built" baseline. Born from
+the operator's observation (2026-10-05) that the v3.3 ledger — which marks rows
+`superseded` instead of deleting them — already held the history; what was
+missing was a timestamp for *when* a fact stopped being current.
+
+### Added
+- **`superseded_at` column** (`schema.sql`). The ISO timestamp at which a row
+  STOPPED being active (`NULL` while it is). This is the axis the earlier schema
+  lacked: `valid_from` records when the fact became *true in the world*, while
+  `superseded_at` records the *lifecycle of the row* — and `updated_at` cannot
+  serve, because a REDUNDANT confirmation rewrites it without ending anything.
+  Without a dedicated column, point-in-time retrieval is impossible to express
+  correctly: the operator's first SQL draft referenced `superseded_at` before it
+  existed, which is what surfaced the gap.
+- **`--as-of YYYY-MM-DD`** on `query`, `search` and `context`. Reconstructs the
+  facts visible on that date instead of the current set. A bare date means *end
+  of that day* (`2026-07-01` → `T23:59:59`), so a row created at 10:00 on that
+  day is visible; a full timestamp is used verbatim. Verified against a
+  MySQL→PostgreSQL switch: the pre-switch fact is returned for a date before it
+  and the successor for a date after, with no overlap.
+- **`_as_of_clause()`** — one helper builds the visibility predicate shared by
+  the lexical and vector paths, so both halves of the hybrid search agree on
+  what "visible on date D" means.
+
+### Changed
+- **`ensure_lifecycle_columns()`** now also adds `superseded_at` (and its index)
+  to an older DB, so the migration is idempotent for existing installations.
+- **`apply_resolution()` and `resolve`/`--confirm`/`--reject`** stamp
+  `superseded_at` at each `active → superseded` transition, inside the existing
+  atomic transaction (C2). The column is maintained by the real resolution path,
+  not only by a one-off backfill.
+- **`search_lexical()` / `search_vector()` / `search_hybrid()`** take an optional
+  `as_of`; default (`None`) behaviour is byte-for-byte the previous "active only"
+  query — verified by a regression run against the live database.
+
+### Data maintenance (real database, 2026-10-05)
+- **3 475 `superseded` rows backfilled** with
+  `superseded_at = COALESCE(updated_at, created_at)`. Backup taken and
+  `integrity_check` verified before the write; post-run `foreign_key_check`
+  clean; zero active rows carry a `superseded_at`.
+- _Note recorded for a future release:_ `--as-of` cannot reconstruct a state
+  older than the first indexing date (`created_at` floor, here 2026-10-03), since
+  no row predates it. Historical *world* time belongs to `valid_from`, a separate
+  axis, not to row lifecycle.
+
 ## v3.3.0 — Referential Integrity, Transactional Writes, Ontology→DB Sync (2026-10-05)
 
 Hardening release. An audit of the fact-lifecycle layer found that the schema
