@@ -317,6 +317,11 @@ Environment variables with defaults:
 - Ollama (optional — LLM extraction and cluster summaries)
 - No pip packages required for core pipeline. Hybrid search requires sqlite-vec (optional).
 
+> **Recommended local model:** `qwen2.5:7b` for Auto-Capture and conflict
+> arbitration. The smaller `qwen2.5:3b` was found to return empty extractions and
+> to split numeric values (`Ubuntu 24.04`); 7 b extracts whole facts reliably.
+> Both are local — the loopback-only guarantee is unchanged.
+
 ## Nightly Cron
 
 ```bash

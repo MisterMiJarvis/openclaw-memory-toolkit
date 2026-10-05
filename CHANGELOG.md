@@ -2,6 +2,44 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.2.1 — Ontology Reindex, Number-Safe Splitting, Local Model Bump (2026-10-05)
+
+Maintenance release. Three defects found during the first live Auto-Capture
+session, all fixed and verified against the real database.
+
+### Fixed
+- **`hybrid-search/hybrid_search.py` — nested-schema ontology indexing.**
+  `index_jsonl_file()` read `name`/`type` at the JSON root, but ontology lines
+  are nested (`{"entity": {"properties": {"name": …}, "type": …}, "op": …}`).
+  Every graph node was therefore indexed as the literal string `" ()"` —
+  **2 786 junk rows, 69 % of the database**, which also polluted the FTS5 and
+  vector indexes. The function now reads both flat and nested schemas, falls
+  back to `id`, and applies a real minimum-length guard (`len(content) <= 4`);
+  the previous `if not content.strip()` check let `" ()"` through because
+  `"()"` is not the empty string. A `skipped` counter is now reported.
+- **`hybrid-search/conflict_resolver.py` — number-safe punctuation split.**
+  `extract_atomic()` split on every period, breaking version strings and
+  percentages: `Ubuntu 24.04` became `Ubuntu 24` + `04`, and `… à 100% atteint`
+  lost its tail. A period now splits only when not sandwiched between digits
+  (`(?<![0-9])\.(?![0-9])`), and any purely-numeric orphan fragment is
+  re-attached as a safety net. Semicolons and coordinating conjunctions still
+  split as before.
+- **`skills/med-reminder/supabase_med.py`** (adjacent skill) — `get_history()`
+  and `get_missed_days()` defaulted to a non-existent medication name
+  (`"default"`), so even an argument-less call returned nothing; a bad
+  positional call produced `operator does not exist: text = integer`. Defaults
+  corrected to `"the-real-medication"` and an explicit `TypeError` guard added.
+
+### Changed
+- **Default extraction model: `qwen2.5:3b` → `qwen2.5:7b`** (still local).
+  The 3 b model returned empty `{}` extractions in ~20 s and split version
+  numbers; the 7 b model extracts whole facts in ~44 s. Loopback-only
+  guarantee preserved — no cloud model is used.
+- **Database maintenance:** 2 786 empty ontology rows moved to
+  `superseded` (reversible, not deleted) and the 898 clean nodes re-indexed
+  (`0` errors, 34 `relate` lines correctly skipped). Backup taken before the
+  operation.
+
 ## v3.2.0 — Auto-Capture: Session Dialogue → Arbitrated Facts (2026-10-04)
 
 Feature release. Adds the write-behind half of the autonomous memory loop: a
@@ -13,7 +51,7 @@ only archives/indexes daily notes and never arbitrates.
 ### Added
 - **`hybrid-search/auto_capture.py`** — post-turn fact extraction. Gating
   (regex/length) skips trivial exchanges before any LLM call; a local model
-  (`qwen2.5:3b` by default) returns atomic facts; results are handed to
+  (`qwen2.5:7b` by default) returns atomic facts; results are handed to
   `conflict_resolver.py`. Guards: local-only endpoint, user-anchored extraction
   (echo-loop guard drops assistant speculation), subject anti-hallucination
   (a subject must appear in the fact text or it is dropped), `--selftest`.
