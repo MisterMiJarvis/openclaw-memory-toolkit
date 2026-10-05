@@ -33,6 +33,20 @@ never let the repo and the skill drift.**
    parses, the loopback test passes and the tree is clean.
 4. **Tag + push:** `scripts/release.sh release vX.Y.Z "message"`, then create the
    GitHub release.
+
+> **MUST — a git tag is NOT a release. Create the GitHub Release too.** The
+> operator had to point this out on 2026-10-05: v3.2.1 had its tag pushed but
+> appeared nowhere in the repo's Releases tab. The tag is a bare pointer; the
+> Release is the readable, dated entry a human actually sees. After pushing the
+> tag, always run:
+> ```bash
+> gh release create vX.Y.Z \
+>   --title "vX.Y.Z — <title>" \
+>   --notes "<same content as the CHANGELOG entry>"
+> ```
+> Verify with `gh release list` — the new version must appear as `Latest`. A
+> release is not "done" until it is in that list.
+
 5. **ClawHub** is published by the operator, from the repo.
 
 > **MUST — every release updates the CHANGELOG *and* the README.** The operator
