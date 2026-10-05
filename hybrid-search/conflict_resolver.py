@@ -157,13 +157,44 @@ def now_iso() -> str:
 # compound statement on punctuation and coordinating conjunctions, yielding
 # unit claims. Kept deliberately dumb and deterministic.
 
-_SPLIT_RE = re.compile(r"\s*(?:;|\.|,?\s+(?:et|and|puis|then)\s+)\s*", re.IGNORECASE)
+# ─── Split rules ────────────────────────────────────────────────────────────
+# A period is only treated as a sentence boundary, never as a cut inside a
+# number: version strings (24.04), decimals (3.14) and percentages (100% /
+# 12,5 %) must survive intact. Bug seen 2026-10-05: "Ubuntu 24.04" was split
+# into "Ubuntu 24" + "04", and "...à 100% atteint" lost its tail.
+#
+# A period splits only when NOT sandwiched between digits on both sides.
+_SPLIT_RE = re.compile(
+    r"\s*(?:;"                       # semicolons always split
+    r"|(?<![0-9])\.(?![0-9])"       # a dot, but not 24.04 / 3.14
+    r"|,?\s+(?:et|and|puis|then)\s+"  # coordinating conjunctions
+    r")\s*",
+    re.IGNORECASE,
+)
 
 
 def extract_atomic(text: str) -> list[str]:
-    """Split a compound statement into unit facts."""
-    parts = [p.strip(" .;") for p in _SPLIT_RE.split(text or "") if p.strip(" .;")]
-    return parts or ([text.strip()] if (text or "").strip() else [])
+    """Split a compound statement into unit facts.
+
+    Numbers are protected: version strings, decimals and percentages are kept
+    whole (see _SPLIT_RE). Surrounding whitespace and trailing punctuation are
+    trimmed, but a trailing '%' is preserved.
+    """
+    parts = [
+        p.strip(" .;")
+        for p in _SPLIT_RE.split(text or "")
+        if p.strip(" .;")
+    ]
+    # A split may have orphaned a leading fragment (e.g. "04" after a bad
+    # decimal cut). Re-attach any part that is purely numeric to the previous
+    # one, so "Ubuntu 24" + "04" becomes "Ubuntu 24.04" again.
+    merged: list[str] = []
+    for part in parts:
+        if merged and re.fullmatch(r"[0-9][0-9.,]*", part):
+            merged[-1] = f"{merged[-1]}.{part}"
+        else:
+            merged.append(part)
+    return merged or ([text.strip()] if (text or "").strip() else [])
 
 
 # ─── Step 2: targeted retrieval of concurrent active facts ────────────────────
