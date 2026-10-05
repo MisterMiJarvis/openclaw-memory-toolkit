@@ -4,8 +4,8 @@ All notable changes to the OpenClaw Memory Toolkit skill.
 
 ## v3.2.1 — Ontology Reindex, Number-Safe Splitting, Local Model Bump (2026-10-05)
 
-Maintenance release. Three defects found during the first live Auto-Capture
-session, all fixed and verified against the real database.
+Maintenance release. Two defects found during the first live Auto-Capture
+session, both fixed and verified against the real database.
 
 ### Fixed
 - **`hybrid-search/hybrid_search.py` — nested-schema ontology indexing.**
@@ -24,11 +24,6 @@ session, all fixed and verified against the real database.
   (`(?<![0-9])\.(?![0-9])`), and any purely-numeric orphan fragment is
   re-attached as a safety net. Semicolons and coordinating conjunctions still
   split as before.
-- **`skills/med-reminder/supabase_med.py`** (adjacent skill) — `get_history()`
-  and `get_missed_days()` defaulted to a non-existent medication name
-  (`"default"`), so even an argument-less call returned nothing; a bad
-  positional call produced `operator does not exist: text = integer`. Defaults
-  corrected to `"the-real-medication"` and an explicit `TypeError` guard added.
 
 ### Changed
 - **Default extraction model: `qwen2.5:3b` → `qwen2.5:7b`** (still local).
