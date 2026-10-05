@@ -660,7 +660,18 @@ def source_freshness(store: "HybridMemoryStore") -> dict:
 
 def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer: str,
                      source: str, base_score: float, delay: float = 0.1) -> tuple[int, int]:
-    """Index a JSONL file where each line is a JSON object. Uses 'name' + 'type' as content."""
+    """Index a JSONL file where each line is a JSON object.
+
+    Handles two schemas:
+      * flat:      {"name": ..., "type": ...}
+      * ontology:  {"entity": {"id": ..., "type": ..., "properties": {"name": ...}}, "op": ...}
+
+    Ontology entries (memory/ontology/graph.jsonl) are nested under "entity", so a
+    root-only lookup produced an empty name and indexed the literal string " ()" for
+    every node — 2 786 junk rows (69 % of the DB) discovered 2026-10-05. The minimum-length
+    guard below replaces the old `if not content.strip()` check, which let " ()" through
+    because "()" is not the empty string.
+    """
     try:
         safe_path = safe_resolve(fpath)
     except UnsafeFileError as e:
@@ -668,6 +679,7 @@ def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer:
         return (0, 1)
 
     indexed = 0
+    skipped = 0
     errors = 0
     with open(safe_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -676,10 +688,19 @@ def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer:
                 continue
             try:
                 obj = json.loads(line)
-                name = obj.get("name", "")
-                obj_type = obj.get("type", "")
-                content = f"{name} ({obj_type})"
-                if not content.strip():
+                # Support both flat and nested (ontology) schemas.
+                entity = obj.get("entity", obj)
+                if not isinstance(entity, dict):
+                    entity = obj
+                props = entity.get("properties", {})
+                if not isinstance(props, dict):
+                    props = {}
+                name = props.get("name") or entity.get("name") or entity.get("id") or ""
+                obj_type = entity.get("type") or obj.get("type") or ""
+                content = f"{name} ({obj_type})".strip()
+                # Real guard: skip entries with no meaningful text, not just empty strings.
+                if len(content) <= 4:
+                    skipped += 1
                     continue
                 embedding = get_embedding(content[:2000])
                 store.add_memory(
@@ -692,6 +713,9 @@ def index_jsonl_file(store: HybridMemoryStore, fpath: str, category: str, layer:
             except Exception as e:
                 print(f"    [ERROR] JSONL line failed: {e}", flush=True)
                 errors += 1
+
+    if skipped:
+        print(f"    [SKIP] {skipped} JSONL entr{'y' if skipped == 1 else 'ies'} without meaningful text", flush=True)
 
     return (indexed, errors)
 

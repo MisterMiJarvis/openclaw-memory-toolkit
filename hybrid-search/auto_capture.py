@@ -61,7 +61,7 @@ DEFAULT_BUFFER = "/tmp/auto_captured_facts.jsonl"
 
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-DEFAULT_MODEL = os.environ.get("AUTO_CAPTURE_MODEL", "qwen2.5:3b")
+DEFAULT_MODEL = os.environ.get("AUTO_CAPTURE_MODEL", "qwen2.5:7b")
 GEN_TIMEOUT = int(os.environ.get("AUTO_CAPTURE_TIMEOUT", "60"))
 
 CAPTURE_PROMPT = """Tu es un extracteur de mémoire pour un agent personnel.

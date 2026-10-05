@@ -47,8 +47,15 @@ echo "SKILL.md (frontmatter preserved)"
 if [ $DRY -eq 1 ]; then
   say "would rebuild SKILL.md body"
 else
-  if [ -f "$SKILL_DIR/SKILL.md" ] && head -1 "$SKILL_DIR/SKILL.md" | grep -q '^---$'; then
-    { sed -n '1,4p' "$SKILL_DIR/SKILL.md"; cat "$REPO_DIR/SKILL.md"; } > "$SKILL_DIR/SKILL.md.tmp"
+  if [ -f "$REPO_DIR/SKILL.md" ] && head -1 "$REPO_DIR/SKILL.md" | grep -q '^---$'; then
+    {
+      if [ -f "$SKILL_DIR/SKILL.md" ] && head -1 "$SKILL_DIR/SKILL.md" | grep -q '^---$'; then
+        sed -n '1,4p' "$SKILL_DIR/SKILL.md"
+      else
+        sed -n '1,4p' "$REPO_DIR/SKILL.md"
+      fi
+      cat "$REPO_DIR/SKILL.md" | tail -n +5
+    } > "$SKILL_DIR/SKILL.md.tmp"
     mv "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
     say "SKILL.md body synced (frontmatter kept)"
   else

@@ -1,3 +1,8 @@
+---
+name: memory-health
+description: Complete memory management pipeline for OpenClaw agents — extraction, archiving, scoring, consolidation, health monitoring, hygiene, and ontology. Local by default (Ollama over local HTTP). Use for memory health checks, hybrid search, fact arbitration, cold-storage compaction, and memory pipeline maintenance.
+---
+
 # Memory Pipeline Skill
 
 Complete memory management pipeline for OpenClaw agents: extraction, archiving,

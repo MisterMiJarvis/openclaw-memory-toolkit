@@ -90,6 +90,14 @@ while IFS= read -r line; do
 done < <(grep -rn --include=*.py -E 'os\.environ.*"(OLLAMA_URL|OLLAMA_GEN_URL|OLLAMA_EMBED_URL)"' . | grep -v "__pycache__" || true)
 [ "$UNG_VIOL" -eq 0 ] && ok "no unguarded OLLAMA_* URL read"
 
+echo "== 4c. SKILL.md frontmatter present =="
+if head -1 "$REPO_DIR/SKILL.md" | grep -q '^---$'; then
+  grep -q '^name:' "$REPO_DIR/SKILL.md" && ok "frontmatter: name present" || bad "frontmatter: missing 'name:'"
+  grep -q '^description:' "$REPO_DIR/SKILL.md" && ok "frontmatter: description present" || bad "frontmatter: missing 'description:'"
+else
+  bad "SKILL.md frontmatter missing (must start with ---)"
+fi
+
 echo "== 5. python syntax =="
 PYBIN="/tmp/v22-vec/bin/python"; [ -x "$PYBIN" ] || PYBIN="python3"
 for f in "$REPO_DIR"/*.py "$REPO_DIR"/hybrid-search/*.py; do
