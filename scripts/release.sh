@@ -126,6 +126,20 @@ if [ "${1:-check}" = "release" ]; then
   fi
   git tag -a "$VERSION" -m "${MSG:-$VERSION}"
   git push origin "$VERSION"
+  # `git push origin <tag>` pushes ONLY the tag. Without this, main stays
+  # behind the released commit and a fresh clone misses the release — exactly
+  # the v3.3.0 mishap. Push the current branch too, and skip silently if it is
+  # already level with its upstream.
+  BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  if git rev-parse -q --verify "refs/remotes/origin/$BRANCH" >/dev/null; then
+    if [ "$(git rev-parse "$BRANCH")" != "$(git rev-parse "origin/$BRANCH")" ]; then
+      git push origin "$BRANCH" && echo "${GRN}pushed branch $BRANCH${RST}"
+    else
+      echo "branch $BRANCH already up to date with origin"
+    fi
+  else
+    git push -u origin "$BRANCH" && echo "${GRN}pushed new branch $BRANCH${RST}"
+  fi
   echo "${GRN}tagged and pushed $VERSION${RST}"
   echo "next: GitHub release, then ClawHub (manual, Stéphane)."
 else
