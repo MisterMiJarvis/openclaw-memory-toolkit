@@ -2,6 +2,48 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.6.0 — Conflict arbitration was dead on arrival (2026-10-06)
+
+Fix release. Closes the finding that the `superseded` / `disputed` lifecycle paths
+had **never executed once**. The cause was not the subject fidelity work of v3.5.0
+nor the source echo guard: it was a missing model tag.
+
+### Fixed
+- **The arbiter asked Ollama for a model that does not exist.** `conflict_resolver`
+  sent the bare name `glm-5.2`, while the daemon serves `glm-5.2:cloud`. Ollama
+  answered **HTTP 404**, `classify_relation()` fell through to the conservative
+  heuristic, and *every* fact came back `COMPATIBLE / no confident relation detected`.
+  Conflict arbitration had therefore never fired: `superseded` and `disputed` were
+  unreachable code paths. Verified against a real contradiction (backup broken →
+  repaired): the LLM now returns `CONTRADICTION` with a correct rationale, and
+  `--apply` writes `status=superseded` + the `superseded_by` link.
+- **`consolidate_advisor.py` carried the identical defect** (`OLLAMA_MODEL` default
+  `"glm-5.2"`), so the advisor was silently producing nothing for the same reason.
+  Both modules now resolve their model the same way.
+
+### Changed
+- **Model resolution is no longer hard-coded.** A hard-coded name — even one with
+  the correct tag — rots on the next model swap. Both modules now resolve against
+  the models the daemon actually serves (`GET /api/tags`): an explicit
+  `CONFLICT_LLM_MODEL` / `TRACE_LLM_MODEL` / `OLLAMA_MODEL` still wins, otherwise
+  the first served model from a preference list is used, and an unreachable daemon
+  falls back to a tagged preference instead of crashing or sending a bare name.
+- **New regression test `hybrid-search/test_model_resolution.py`** pins the three
+  behaviours (explicit env wins / resolves to a served model / offline fallback is
+  tagged). Wired into `scripts/sync-skill.sh` and the `release.sh check` gate.
+- **Source filter (M4 follow-up):** trivially short user turns (`go`, `ok`, `top`, …)
+  are skipped by the trace extractor instead of being mined for durable facts — the
+  76-turn dry-run contained 18% such turns feeding ~80% operational noise.
+
+### Verified
+- Real contradiction on a DB copy: `[contradiction] Le backup nightly est repare`
+  → `--apply` → `id=5134 status=superseded superseded_by=5135`.
+- Non-contradictions still classified `COMPATIBLE` (Kavita `0.9.0 → 0.9.1.4`; Dovato
+  morning vs evening "plus le matin") — the arbiter discriminates, it does not cry
+  conflict.
+- `test_model_resolution.py`: 3/3 hold. `test_loopback_guard.py`: all guards hold
+  (run under the skill venv, which has `sqlite_vec`).
+
 ## v3.5.0 — Subject fidelity (M4) + source echo guard (2026-10-06)
 
 Fix release. Closes the M4 audit finding — the one that made conflict arbitration

@@ -92,7 +92,40 @@ def get_safe_ollama_url(env_var: str, default: str) -> str:
 
 
 OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "glm-5.2")
+# A bare "glm-5.2" was sent while the installed model is "glm-5.2:cloud": Ollama
+# answered 404 and the advisor silently produced nothing. Same defect as
+# conflict_resolver.LLM_MODEL, found together (2026-10-06). Resolve against the
+# models the daemon actually serves so it cannot rot again on a model swap.
+PREFERRED_MODELS = (
+    "glm-5.2:cloud",
+    "deepseek-v4-pro:cloud",
+    "deepseek-v4.1-flash:cloud",
+    "qwen2.5:7b",
+)
+
+
+def resolve_llm_model(explicit: str | None = None) -> str:
+    """Pick a model Ollama can actually serve (never an unknown name)."""
+    if explicit:
+        return explicit
+    try:
+        url = OLLAMA_URL.rstrip("/") + "/api/tags"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
+    except Exception:
+        names = set()
+    if not names:
+        return PREFERRED_MODELS[0]
+    for cand in PREFERRED_MODELS:
+        if cand in names:
+            return cand
+    for name in sorted(names):
+        if "embed" not in name:
+            return name
+    return PREFERRED_MODELS[0]
+
+
+OLLAMA_MODEL = resolve_llm_model(os.environ.get("OLLAMA_MODEL"))
 
 PROMOTE_THRESHOLD = 2.0
 STALE_THRESHOLD = 0.15

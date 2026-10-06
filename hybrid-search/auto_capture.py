@@ -405,8 +405,21 @@ def process_transcript(path: str, args) -> int:
         print("⏭  no turns found in transcript.")
         return 0
     rc = 0
+    skipped_trivial = 0
     for user_msg, assistant_msg in turns:
+        # Gate A (v3.5): a trivial user turn ("Go", "Ok", "Top", a bare ack)
+        # carries no durable fact. When the assistant half is a long report, the
+        # only "fact" an extractor could produce would be a restatement of the
+        # AGENT's own work — exactly the meta-noise seen in the 2026-10-06 dry-run.
+        # Skipping here (rather than extracting then discarding) saves the LLM call.
+        if is_trivial(user_msg):
+            skipped_trivial += 1
+            if getattr(args, "verbose", False):
+                print(f"⏭  gated: trivial user turn, no capture. ({user_msg.strip()[:40]!r})")
+            continue
         rc = process_exchange(user_msg, assistant_msg, args) or rc
+    if skipped_trivial and getattr(args, "verbose", False):
+        print(f"⏭  {skipped_trivial} trivial turn(s) skipped before extraction.")
     return rc
 
 

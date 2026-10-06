@@ -94,7 +94,51 @@ OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
 # generated URL is derived from the already-validated OLLAMA_URL, so the default
 # remains loopback and any explicit override must pass the allowlist too.
 OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + "/api/generate")
-LLM_MODEL = os.environ.get("CONFLICT_LLM_MODEL", os.environ.get("TRACE_LLM_MODEL", "glm-5.2"))
+# The arbiter LLM name. A bare "glm-5.2" was sent while the installed model is
+# "glm-5.2:cloud" — Ollama answered 404, classify_relation fell through to the
+# conservative heuristic, and EVERY fact came back `COMPATIBLE / no confident
+# relation detected`. Conflict arbitration was therefore dead on arrival: the
+# superseded/disputed paths had never executed once.
+#
+# A hard-coded name (even with the tag) would rot again on the next model swap,
+# so we resolve it against the models the daemon actually serves. Precedence:
+# explicit env vars -> the first available cloud model that is not an embedder.
+PREFERRED_MODELS = (
+    "glm-5.2:cloud",
+    "deepseek-v4-pro:cloud",
+    "deepseek-v4.1-flash:cloud",
+    "qwen2.5:7b",
+)
+
+
+def resolve_llm_model(explicit: str | None = None) -> str:
+    """Pick a model that Ollama can actually serve.
+
+    Never returns a name the daemon does not know: a 404 here silently disables
+    arbitration, which is exactly the regression fixed in v3.6.0.
+    """
+    if explicit:
+        return explicit
+    try:
+        url = OLLAMA_URL.rstrip("/") + "/api/tags"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
+    except Exception:
+        names = set()
+    if not names:
+        return PREFERRED_MODELS[0]
+    for cand in PREFERRED_MODELS:
+        if cand in names:
+            return cand
+    for name in sorted(names):
+        if "embed" not in name:  # an embedder would never answer a chat prompt
+            return name
+    return PREFERRED_MODELS[0]
+
+
+LLM_MODEL = resolve_llm_model(
+    os.environ.get("CONFLICT_LLM_MODEL") or os.environ.get("TRACE_LLM_MODEL")
+)
 
 # Confidence below which a weak contradiction is escalated to `disputed`
 # instead of being auto-superseded (a wrong supersede destroys a truth).

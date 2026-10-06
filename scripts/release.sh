@@ -29,7 +29,8 @@ SYNC_FILES=(
   auto_archive.py consolidate_advisor.py memory-health.py scoring.py ontology_compact.py
   hybrid-search/hybrid_search.py hybrid-search/compact.py
   hybrid-search/conflict_resolver.py hybrid-search/schema.sql
-  hybrid-search/test_loopback_guard.py docs/SECURITY-AUDIT-NOTES.md
+  hybrid-search/test_loopback_guard.py hybrid-search/test_model_resolution.py
+  docs/SECURITY-AUDIT-NOTES.md
   hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
 )
 
@@ -99,7 +100,17 @@ else
 fi
 
 echo "== 5. python syntax =="
-PYBIN="/tmp/v22-vec/bin/python"; [ -x "$PYBIN" ] || PYBIN="python3"
+# Interpreter for syntax + test steps. Must have sqlite_vec: hybrid_search imports
+# it at module level, so a bare `python3` makes test_loopback_guard fail with a
+# misleading 'sqlite-vec is not installed' error (seen 2026-10-06). Prefer the
+# skill venv — the interpreter the toolkit actually runs under — then the old
+# scratch venv, then whatever python3 we have.
+PYBIN="${SKILL_DIR:-$HOME/.openclaw/workspace/skills/memory-health}/.venv/bin/python"
+[ -x "$PYBIN" ] || PYBIN="/tmp/v22-vec/bin/python"
+[ -x "$PYBIN" ] || PYBIN="python3"
+if ! "$PYBIN" -c 'import sqlite_vec' >/dev/null 2>&1; then
+  warn "$PYBIN lacks sqlite_vec — guard tests may fail spuriously"
+fi
 for f in "$REPO_DIR"/*.py "$REPO_DIR"/hybrid-search/*.py; do
   "$PYBIN" -c "import ast,sys; ast.parse(open('$f').read())" 2>/dev/null \
     && ok "$(basename "$f")" || bad "syntax: $(basename "$f")"
@@ -108,6 +119,9 @@ done
 echo "== 6. loopback guard test =="
 "$PYBIN" hybrid-search/test_loopback_guard.py >/dev/null 2>&1 \
   && ok "test_loopback_guard.py passes" || bad "test_loopback_guard.py FAILED"
+
+"$PYBIN" hybrid-search/test_model_resolution.py >/dev/null 2>&1 \
+  && ok "test_model_resolution.py passes" || bad "test_model_resolution.py FAILED"
 
 echo "== 7. git hygiene =="
 if [ -n "$(git status --porcelain)" ]; then
