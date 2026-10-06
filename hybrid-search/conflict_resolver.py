@@ -100,13 +100,17 @@ OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + 
 # relation detected`. Conflict arbitration was therefore dead on arrival: the
 # superseded/disputed paths had never executed once.
 #
-# A hard-coded name (even with the tag) would rot again on the next model swap,
-# so we resolve it against the models the daemon actually serves. Precedence:
-# explicit env vars -> the first available cloud model that is not an embedder.
+# A hard-coded name rots again on the next model swap, so we resolve it against
+# the models the daemon actually serves. Precedence: explicit env vars -> the
+# first served model from this preference list.
+#
+# The list follows the operator's real default (agents.defaults.compaction.model
+# = Ollama deepseek-v4-pro cloud), NOT the v2.2.0-era hard-coded "glm-5.2" that
+# had silently disabled arbitration until v3.6.0.
 PREFERRED_MODELS = (
-    "glm-5.2:cloud",
     "deepseek-v4-pro:cloud",
     "deepseek-v4.1-flash:cloud",
+    "glm-5.2:cloud",
     "qwen2.5:7b",
 )
 

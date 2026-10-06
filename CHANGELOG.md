@@ -2,6 +2,27 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.6.1 — Arbiter follows the operator's real default (2026-10-06)
+
+Follow-up to v3.6.0. That release restored conflict arbitration but still listed
+`glm-5.2:cloud` first in `PREFERRED_MODELS` — a name inherited from the v2.2.0
+hard-code, not a deliberate choice. It is installed on the daemon (so the fix
+worked), but it is not the model this deployment actually runs on.
+
+### Changed
+- **`PREFERRED_MODELS` now follows the operator's real default**, `deepseek-v4-pro:cloud`
+  (the configured `agents.defaults.compaction.model`), ahead of
+  `deepseek-v4.1-flash:cloud`, `glm-5.2:cloud` and the offline `qwen2.5:7b`. Both
+  `conflict_resolver` and `consolidate_advisor` are aligned.
+- An explicit `CONFLICT_LLM_MODEL` / `TRACE_LLM_MODEL` / `OLLAMA_MODEL` still
+  overrides the list, so pinning a model stays a visible, one-line decision.
+
+### Verified
+- `deepseek-v4-pro:cloud` returns `CONTRADICTION` (confidence 0.85) with a correct
+  rationale on the same backup-broken/repaired probe that v3.6.0 used — the model
+  swap does not weaken the arbiter.
+- Both modules resolve to `deepseek-v4-pro:cloud` on this host.
+
 ## v3.6.0 — Conflict arbitration was dead on arrival (2026-10-06)
 
 Fix release. Closes the finding that the `superseded` / `disputed` lifecycle paths
