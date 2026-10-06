@@ -139,9 +139,15 @@ SECURITY RULES (MANDATORY):
 5. EXCLUDE: any casual conversational context, personal opinions, or subjective commentary
 6. Be SPECIFIC: include names, versions, numbers (but never secrets)
 7. Keep descriptions SHORT (max 15 words each)
+8. SUBJECT (M4): every item MUST carry a `subject` — the SHORT entity the item is
+   about, lowercased, words joined with underscores (e.g. dovaato, kavita_home,
+   backup_cron, astrocapture). Use the same subject for items about the same
+   entity, and never invent an entity absent from the note. If truly no entity
+   fits, use "general". The subject is what lets the conflict resolver detect
+   that a later note contradicts an earlier one.
 
 Return ONLY valid JSON. No markdown. No code fences. No extra text. Just the JSON object:
-{"decisions":[{"what":"short description","date":"YYYY-MM-DD"}],"errors":[{"what":"short description","date":"YYYY-MM-DD"}],"facts":[{"what":"short description","date":"YYYY-MM-DD"}],"promote_to_memory":["items worth promoting to MEMORY.md"]}
+{"decisions":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"errors":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"facts":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"promote_to_memory":["items worth promoting to MEMORY.md"]}
 
 DAILY NOTES:
 """
@@ -524,6 +530,42 @@ def extract_with_patterns(text):
     }
 
 
+def _norm_subject(item) -> "str | None":
+    """Normalise an extracted item's subject the SAME way auto_capture.py does.
+
+    M4: trace_extractor.py used to carry no subject at all, so every trace item
+    reached the fact ledger with subject=NULL and the conflict resolver could not
+    match a later note against an earlier one (arbitration returned
+    "no confident relation detected" for everything). We reuse the exact
+    normalisation rules of auto_capture._normalise_facts so both producers agree
+    on the key: lowercase, words -> underscores, grounded against the text,
+    never invented. A subject that grounds nothing is dropped.
+    """
+    if not isinstance(item, dict):
+        return None
+    what = str(item.get("what") or item.get("content") or "").strip()
+    subject = str(item.get("subject") or "").strip().lower()
+    subject = re.sub(r"\s+", "_", subject) or None
+    if not subject:
+        return None
+    # The LLM is asked for snake_case ("kavita_home"), and '\w' INCLUDES '_', so
+    # splitting on '[^\w]+' left the key in ONE token and grounding then failed,
+    # collapsing "kavita_home" to the fallback word "kavita". Split on underscore
+    # too, so each entity word can be grounded independently.
+    tokens = [t for t in re.split(r"[^\w]+", subject.replace("_", " ")) if len(t) >= 3]
+    # Compare against the TOKENISED text, never the space-stripped string:
+    # "kavita home" flattened to "kavitahome" makes "home" unmatchable, which
+    # silently truncated the key (M4 root cause carried over from auto_capture).
+    text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", what.lower()))
+    grounded = [t for t in tokens if t in text_words]
+    if grounded:
+        return "_".join(grounded[:2])
+    if tokens:
+        words = [w.lower() for w in re.findall(r"[A-Za-z\u00c0-\u00ff]{4,}", what)]
+        return words[0] if words else None
+    return None
+
+
 def write_daily_extraction(extractions, source="trace-extractor"):
     """Write extracted items to today's daily notes."""
     today = date.today().isoformat()
@@ -548,7 +590,11 @@ def write_daily_extraction(extractions, source="trace-extractor"):
             entry += f"\n**{label}:**"
             for item in items:
                 what = item.get("what", item) if isinstance(item, dict) else item
-                entry += f"\n- {emoji} {what}"
+                subj = _norm_subject(item) if isinstance(item, dict) else None
+                # M4: carry the entity key into the note line so the downstream
+                # indexer can attach a real subject instead of NULL.
+                tag = f" [subject:{subj}]" if subj else ""
+                entry += f"\n- {emoji} {what}{tag}"
     
     promotions = extractions.get("promote_to_memory", [])
     if promotions:

@@ -151,6 +151,48 @@ def has_signal(text: str) -> bool:
     return any(p.search(text) for p in SIGNAL_PATTERNS)
 
 
+# M4 (v3.5): an assistant turn that is a tool/agent completion or a cron report
+# is NOT a conversational assertion by the user. Before v3.5 the only gate was
+# `should_capture(user_msg)`, so an assistant message like
+#
+#   "python3 skills/med-reminder/soriatane.py executed from ..."
+#
+# was handed to the extractor as ASSISTANT and came back as a "durable fact" —
+# an echo of the agent's own activity (observed in the 2026-10-06 dry-run: 4 of
+# 5 extracted "facts" were tool logs, tautologies or meta-reasoning). These
+# patterns only ever appear in machine-generated turns, never in a human
+# sentence, so matching one means: drop the assistant half, keep the user half.
+ASSISTANT_ECHO_PATTERNS = [
+    # Tool / shell completions and scheduler payload reports.
+    re.compile(r"\b(exec|process|automations?)\b.{0,40}\b(complet|exit code|stdout|"
+               r"stderr|pid \d|sessionId|status=|durationMs)", re.I),
+    re.compile(r"\bexecuted from\b", re.I),
+    re.compile(r"^\s*(===|---)\s*(end|fin)\b", re.I | re.M),
+    re.compile(r"\b(cron|job)\b.{0,30}\b(payload|run|fired|scheduled|next run|"
+               r"last status|failed|succeeded)\b", re.I),
+    # Bookkeeping status lines the nightly pipeline prints.
+    re.compile(r"\badded\s*[:=]?\s*\d+.{0,60}\bsuperseded\s*[:=]?\s*\d+", re.I),
+    re.compile(r"\(dry-run\b.*--apply", re.I),
+    re.compile(r"^\s*(Summary|Total|Backup|Archive)\s*:", re.I | re.M),
+] + [
+    re.compile(r"\[[^\]]{0,40}\].{0,5}(python3|bash|git|systemctl|openclaw|sqlite3|curl)\b", re.I),
+]
+
+
+def assistant_turn_is_echo(assistant_msg: str) -> bool:
+    """True when the assistant turn is machine output, not conversation.
+
+    M4 echo guard. A tool completion or a scheduled-job report must never be
+    mined for durable facts about the user: it would store the agent's own
+    activity as if the user had asserted it. Returns False for an empty string
+    (a user-only turn is legitimate and must still be analysed).
+    """
+    msg = (assistant_msg or "").strip()
+    if not msg:
+        return False
+    return any(p.search(msg) for p in ASSISTANT_ECHO_PATTERNS)
+
+
 def should_capture(user_msg: str) -> bool:
     """Decide whether an exchange is worth analysing."""
     if is_trivial(user_msg):
@@ -255,9 +297,13 @@ def _normalise_facts(raw) -> list[dict]:
         # the first substantial word of the fact rather than discarding it. A
         # subject that grounds nothing is still dropped (true hallucination).
         if subject:
-            tokens = [t for t in re.split(r"[^\w]+", subject) if len(t) >= 3]
-            flat = re.sub(r"[^\w]+", "", fact).lower()
-            grounded = [t for t in tokens if t in flat]
+            # '_' is part of '\w', so `re.split(r"[^\w]+", "kavita_home")` returns ONE
+            # token and grounding collapses the key to the fallback word "kavita".
+            # Split on underscore too, so each entity word grounds on its own —
+            # this is the normalisation-truncation bug that shrank multi-word keys.
+            tokens = [t for t in re.split(r"[^\w]+", subject.replace("_", " ")) if len(t) >= 3]
+            text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", fact.lower()))
+            grounded = [t for t in tokens if t in text_words]
             if grounded:
                 # Prefer the grounded token(s) — they are the proven anchor.
                 subject = "_".join(grounded[:2])
@@ -314,6 +360,14 @@ def process_exchange(user_msg: str, assistant_msg: str, args) -> int:
         if args.verbose:
             print("⏭  gated: trivial exchange, no capture.")
         return 0
+
+    # M4 echo guard: never mine a machine-generated turn for user facts.
+    # We keep the user half (it is still a real assertion) but drop the
+    # assistant half so its tool log cannot masquerade as a durable fact.
+    if assistant_turn_is_echo(assistant_msg):
+        if args.verbose:
+            print("⏭  gated: assistant turn is machine output (echo guard).")
+        assistant_msg = ""
 
     facts = extract_candidate_facts(user_msg, assistant_msg, args.model)
     if not facts:

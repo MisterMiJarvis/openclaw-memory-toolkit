@@ -2,6 +2,41 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v3.5.0 — Subject fidelity (M4) + source echo guard (2026-10-06)
+
+Fix release. Closes the M4 audit finding — the one that made conflict arbitration
+structurally unable to fire. Three independent defects, one shared root: facts
+reached the ledger with a subject that did not discriminate, so the resolver's
+"is this the same entity?" test could never return a confident match.
+
+### Fixed
+- **Multi-word subjects were truncated to their first word** (`auto_capture._normalise_facts`,
+  mirrored in the new `trace_extractor._norm_subject`). `'\w'` includes `_`, so
+  `re.split(r"[^\w]+", "kavita_home")` yielded a SINGLE token, grounding failed,
+  and the fallback took the fact's first substantial word. `kavita_home` became
+  `kavita`, `backup_cron` became `backup` — so `kavita_home` and `kavita_index`
+  (different entities) collided under one key. Grounding now compares against the
+  tokenised text and splits on underscore too.
+- **`trace_extractor.py` produced no subject at all.** Its prompt never requested
+  one and its writer never emitted one, so every trace item reached the ledger as
+  `subject=NULL`. The prompt now requires a grounded `subject` per item, and the
+  writer emits it as `[subject:key]` on the note line for the downstream indexer.
+- **Machine-generated assistant turns were mined for user facts** (echo guard).
+  The only gate was `should_capture(user_msg)`; an assistant turn carrying a tool
+  completion (`... executed from ...`) or a cron report (`Summary: {'added': 0, ...}`)
+  was handed to the extractor and returned as a "durable fact". `assistant_turn_is_echo()`
+  now drops such turns — the user half is kept, the machine half is discarded.
+
+### Verified
+- Echo guard: 8/8 cases (tool logs, cron summaries, `=== END ===` markers gated;
+  real conversational turns kept).
+- Subject normalisation: `kavita_home`/`backup_cron`/`ubuntu_24_04` keep their full
+  key; v3.3 anti-hallucination behaviour (`Serveur Prod` → `serveur`) preserved.
+
+### Notes
+- `--apply` remains gated behind a real dialogued conflict batch: the
+  `superseded`/`disputed` paths are still unproven on live data.
+
 ## v3.4.0 — Point-in-Time Retrieval (`--as-of`) (2026-10-05)
 
 Feature release. Turns the fact-lifecycle ledger into a time machine: the search
