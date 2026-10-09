@@ -104,12 +104,13 @@ OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + 
 # the models the daemon actually serves. Precedence: explicit env vars -> the
 # first served model from this preference list.
 #
-# The list follows the operator's real default (agents.defaults.compaction.model
-# = Ollama deepseek-v4-pro cloud), NOT the v2.2.0-era hard-coded "glm-5.2" that
-# had silently disabled arbitration until v3.6.0.
+# The list follows the operator's real default (agents.defaults.model.primary
+# = deepseek-v4.1-flash cloud, set 2026-10-09: flash everywhere, Pro kept only as
+# an emergency fallback), NOT the v2.2.0-era hard-coded "glm-5.2" that had
+# silently disabled arbitration until v3.6.0.
 PREFERRED_MODELS = (
-    "deepseek-v4-pro:cloud",
     "deepseek-v4.1-flash:cloud",
+    "deepseek-v4-pro:cloud",
     "glm-5.2:cloud",
     "qwen2.5:7b",
 )

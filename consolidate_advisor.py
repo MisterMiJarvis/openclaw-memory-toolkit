@@ -96,11 +96,13 @@ OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
 # answered 404 and the advisor silently produced nothing. Same defect as
 # conflict_resolver.LLM_MODEL, found together (2026-10-06). Resolve against the
 # models the daemon actually serves so it cannot rot again on a model swap.
-# Preference follows the operator's real default (deepseek-v4-pro), not the
-# v2.2.0-era hard-coded "glm-5.2" that silently disabled this advisor.
+# Preference follows the operator's real default (agents.defaults.model.primary
+# = deepseek-v4.1-flash cloud, set 2026-10-09: flash everywhere, Pro kept only as
+# an emergency fallback), not the v2.2.0-era hard-coded "glm-5.2" that silently
+# disabled this advisor.
 PREFERRED_MODELS = (
-    "deepseek-v4-pro:cloud",
     "deepseek-v4.1-flash:cloud",
+    "deepseek-v4-pro:cloud",
     "glm-5.2:cloud",
     "qwen2.5:7b",
 )
