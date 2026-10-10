@@ -2,6 +2,34 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.2 — Ontology health check no longer cries wolf (2026-10-10)
+
+### Real fix
+
+**`memory-health.py` parser was blind to `op=state`.** The ontology graph is an
+append-only log whose dominant record is now `op=state` (879 of 964 lines in the
+current graph); `create`/`upsert` are the older forms. `check_ontology()` counted
+an entity only for `op in ("create", "upsert")`, so it saw **50 entities** while
+`ontology_compact.py`, which replays the full log, saw **927**. The 34 `relate`
+records pointed at the real entities, so the check reported **68 orphan
+relations on every run** — all of them false.
+
+The parser now accepts `state` as an entity-bearing op. Both tools agree:
+
+```
+before:  50 entities,  68 orphan relations (🟡)
+after : 928 entities,   0 orphan relations (🟢)
+```
+
+No false-positive suppression: the orphan count is still computed and still
+reported when real orphan relations exist. Only the parse was wrong.
+
+### Notes
+
+- Discovered while triaging a health report (10/10): the "68 orphan relations"
+  warning was the health check disagreeing with the compactor, not real drift.
+- `ontology_compact.py` needed no change — it was already correct.
+
 ## v4.0.1 — Security hardening + static-analysis false positives (2026-10-10)
 
 ### Real fixes
