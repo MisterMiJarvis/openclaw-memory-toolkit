@@ -25,6 +25,7 @@ FILES=(
   auto_archive.py consolidate_advisor.py memory-health.py scoring.py ontology_compact.py
   hybrid-search/hybrid_search.py hybrid-search/compact.py
   hybrid-search/conflict_resolver.py hybrid-search/schema.sql
+  hybrid-search/llm_resolution.py
   hybrid-search/test_loopback_guard.py
   hybrid-search/test_model_resolution.py
   hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py

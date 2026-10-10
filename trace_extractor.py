@@ -29,8 +29,18 @@ from pathlib import Path
 # survives ONLY as the last link of the shared chain, and its presence is
 # validated before use (spec v4 section 6.1 — never hang on a synchronous pull).
 _HERE = Path(__file__).resolve().parent
+# The shared resolver lives in hybrid-search/. Look for it in every location this
+# file can be deployed to (repo, installed skill, standalone skill dir) so the
+# import never silently degrades to the old hard-coded fallback.
+for _cand in (
+    _HERE / "hybrid-search",                                  # repo layout
+    _HERE,                                                      # module sits beside us
+    _HERE.parent / "memory-health" / "hybrid-search",           # sibling installed skill
+):
+    if (_cand / "llm_resolution.py").is_file():
+        sys.path.insert(0, str(_cand))
+        break
 try:
-    sys.path.insert(0, str(_HERE / "hybrid-search"))
     from llm_resolution import (
         resolve_llm_model as _resolve_llm_model,
         fallback_model as _fallback_model,
