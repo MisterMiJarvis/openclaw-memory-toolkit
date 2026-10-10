@@ -24,6 +24,33 @@ TEST_QUERIES = [
     "knowledge base inbox archive",
 ]
 
+# Atomic-extraction guard: the splitter must protect numbers (2026-10-05 bug).
+# Kept as data here so `run_tests.py` covers it without a second entry point.
+# `test_extract_atomic.py` remains the detailed, standalone regression suite.
+ATOMIC_CASES = [
+    ("On a migré le serveur sous Ubuntu 24.04", 1),
+    ("Le disque est à 100% atteint", 1),
+    ("j'ai migré la base ; le backup tourne", 2),
+    ("le serveur est en prod et le DNS est à jour", 2),
+]
+
+
+def run_atomic_tests():
+    """Check extract_atomic protects numbers and still splits real clauses."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from conflict_resolver import extract_atomic
+    failures = []
+    print(f"\n{'='*70}")
+    print("ATOMIC EXTRACTION (number-protection guard)")
+    print(f"{'='*70}")
+    for text, want_parts in ATOMIC_CASES:
+        got = extract_atomic(text)
+        if len(got) != want_parts:
+            failures.append(f"{text!r}: split into {len(got)} parts {got}, want {want_parts}")
+        else:
+            print(f"  OK  {text!r} -> {got}")
+    return failures
+
 def run_tests():
     store = HybridMemoryStore(DB_PATH, SCHEMA_PATH)
     all_results = {}
@@ -255,6 +282,14 @@ The index is ready for production use via `python3 hybrid_search.py query "<text
 if __name__ == "__main__":
     print("Running validation queries...")
     results = run_tests()
+
+    # Atomic-extraction guard (extract_atomic coverage, previously missing here).
+    atomic_failures = run_atomic_tests()
+    if atomic_failures:
+        print("\n✗ atomic-extraction failures:")
+        for f in atomic_failures:
+            print("   -", f)
+        sys.exit(1)
 
     # Get stats
     store = HybridMemoryStore(DB_PATH, SCHEMA_PATH)
