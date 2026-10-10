@@ -2,6 +2,22 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.1 — Clear the static-analysis false positive (2026-10-10)
+
+No behaviour change. ClawHub's static analysis flagged
+`hybrid-search/test_ontology_key_parity.py:61` as
+`suspicious.dynamic_code_execution` (critical). It is a false positive: the
+flagged call is the standard Python import machinery loading a **fixed, literal**
+path in the same repository (`migrate_ontology_subjects.py`) — no network, no
+user input, no environment variable, no argv reaches it.
+
+The loader was **not** removed to silence the scanner: the test deliberately
+imports the real migrator module so it tracks the real code instead of a stale
+copy. An inline explanation and a `noqa` marker were added instead.
+
+Also ignores `hybrid-search/FULL_INDEX_REPORT.md` (a run artifact, like
+`test_results.json`).
+
 ## v4.0 — One resolver, one truth (2026-10-10)
 
 **Breaking contract change.** Model selection is no longer copied into each
