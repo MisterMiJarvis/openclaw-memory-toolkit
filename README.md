@@ -301,6 +301,43 @@ python3 hybrid-search/run_tests.py --verbose # Show scores and metadata
 
 **Test fixtures use anonymized terms** (`project_alpha`, `sample_note_01`, etc.) — no real project names or personal data.
 
+The same directory ships the regression guards run by the release gate:
+
+| Guard | Pins |
+|-------|------|
+| `test_model_resolution.py` | the full model-resolution chain + raise-on-missing-safety-model |
+| `test_extract_atomic.py` | `extract_atomic()` number protection and clause splitting |
+| `test_loopback_guard.py` | cloud calls never leave except through the opt-in path |
+| `test_meta_gate.py` | meta/pipeline chatter is never captured as a fact |
+| `test_ontology_key_parity.py` | indexer and ontology migrator build the same display key |
+
+### 10. Model resolution — `hybrid-search/llm_resolution.py` (v4.0)
+
+**Single source of truth for the effective LLM model.** No script hard-codes a
+model name any more; every caller asks this module, which resolves at runtime and
+reports *where the answer came from*.
+
+Resolution chain, in order (first hit wins):
+
+1. an explicit `*_LLM_MODEL` / `OLLAMA_MODEL` env var — **visible and logged**,
+   never silent (the escape hatch is kept on purpose);
+2. the gateway default, `agents.defaults.model.primary` from `openclaw.json`;
+3. the configured fallback, `agents.defaults.model.fallbacks[0]`;
+4. the local safety net (`qwen2.5:7b`), **presence-checked before use** — if the
+   model is absent the module **raises** rather than letting Ollama start a
+   synchronous multi-GB pull that would hang an unattended nightly run.
+
+```python
+from llm_resolution import resolve_llm_model, explain_resolution
+
+resolve_llm_model()   # -> "deepseek-v4.1-flash:cloud" (a name the daemon serves)
+explain_resolution()  # -> {"model": ..., "source": "gateway:primary", "chain": [...]}
+```
+
+**Callers:** `trace_extractor.py`, `hybrid-search/auto_capture.py`,
+`hybrid-search/conflict_resolver.py`, `consolidate_advisor.py`. The model is
+resolved once per run (`@lru_cache`).
+
 ## Ontology
 
 JSONL-based entity and relation graph with YAML schema.
@@ -325,9 +362,10 @@ Environment variables with defaults:
 |----------|---------|-------------|
 | `WORKSPACE` | `~/.openclaw/workspace` | OpenClaw workspace path |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL (localhost only) |
-| `OLLAMA_MODEL` | `glm-5.2` | Model for LLM extraction/summaries |
-| `TRACE_LLM_MODEL` | `glm-5.2` | Model for trace-extractor LLM calls |
-| `CONFLICT_LLM_MODEL` | `glm-5.2` | Model for conflict arbitration (NLI) |
+| `OLLAMA_MODEL` | _(from gateway config)_ | **Explicit override** for LLM extraction/summaries. Unset = follow the gateway |
+| `TRACE_LLM_MODEL` | _(from gateway config)_ | **Explicit override** for trace-extractor LLM calls. Unset = follow the gateway |
+| `CONFLICT_LLM_MODEL` | _(from gateway config)_ | **Explicit override** for conflict arbitration (NLI). Unset = follow the gateway |
+| `OPENCLAW_CONFIG` | `~/.openclaw/openclaw.json` | Gateway config read by the model resolver (v4.0) |
 | `MEMORY_DB` | `hybrid-search/agent_memory.db` | Path to the search/lifecycle DB |
 | `TRACE_LLM_LOCAL_ONLY` | _(unset)_ | Set to `1` to refuse cloud LLM calls and force local-only. **Recommended for any privacy-sensitive deployment.** |
 | `OLLAMA_API_KEY` | _(unset)_ | Enables **Ollama cloud** (`ollama.com`) in `trace_extractor.py`. Unset = local only |

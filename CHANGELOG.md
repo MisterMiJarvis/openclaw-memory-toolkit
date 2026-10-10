@@ -2,6 +2,95 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0 — One resolver, one truth (2026-10-10)
+
+**Breaking contract change.** Model selection is no longer copied into each
+script: it is *resolved* once, at runtime, from the gateway configuration. Every
+caller now goes through a single module, `hybrid-search/llm_resolution.py`, so a
+catalogue rotation or a config change propagates everywhere at once instead of
+silently breaking one script at a time.
+
+### Why this release exists
+
+v3.6.0 and v3.6.1 each fixed a *symptom*: a hard-coded model name that no longer
+matched what the Ollama daemon served (`glm-5.2` vs `glm-5.2:cloud`). The fix
+worked, but the *pattern* that caused it survived — model names were still
+recopied in `PREFERRED_MODELS` lists, in `auto_capture.py`, and in the local
+`trace-extractor` fallback. The next catalogue rotation would have re-broken it.
+v4.0 removes the pattern.
+
+### Added
+
+- **`hybrid-search/llm_resolution.py`** — the single source of truth for the
+effective LLM model. Resolution chain, in order:
+  1. an explicit `*_LLM_MODEL` / `OLLAMA_MODEL` env var (**visible and logged**,
+     never silent — the escape hatch that saved v3.6.0/v3.6.1 is kept);
+  2. the gateway default, `agents.defaults.model.primary` from `openclaw.json`;
+  3. the configured fallback, `agents.defaults.model.fallbacks[0]`;
+  4. the local safety net (`qwen2.5:7b`), **presence-checked before use**.
+  Exposes `resolve_llm_model()` and `explain_resolution() -> {model, source, chain}`
+  for logging and tests. `@lru_cache`d, so a run resolves once.
+- **No-silent-failure invariant (spec §6.1).** A missing local safety model
+  raises a clear error instead of letting Ollama start a synchronous multi-GB
+  pull that would hang an unattended nightly run.
+- **`hybrid-search/test_model_resolution.py` (extended).** Pins the whole
+  precedence chain (explicit > gateway:primary > gateway:fallback > local safety),
+  the served-model guarantee, and the raise-on-missing-safety-model invariant.
+- **`hybrid-search/test_extract_atomic.py` (new).** Covers `extract_atomic()`,
+  a gap flagged in the spec: number protection (`Ubuntu 24.04`, `3.14`, `100%`,
+  `12,5 %`) *and* real clause splitting (semicolons, conjunctions, sentence
+  boundaries).
+- **`hybrid-search/test_ontology_key_parity.py` (new).** Pins indexer/migrator
+  display-key parity. Drift is a failure; a display-key collision (two ids, one
+  key) is reported as data, not drift. It caught a real second issue on first run.
+
+### Changed
+
+- **4 callers migrated to the shared module**, no more hard-coded names:
+  `consolidate_advisor.py`, `hybrid-search/auto_capture.py`,
+  `hybrid-search/conflict_resolver.py`, and `trace_extractor.py` (which also
+  serves the local `trace-extractor` fallback). `qwen2.5:7b` now survives *only*
+  as the last link of the shared chain.
+- **`PREFERRED_MODELS` lists are gone** from the arbiters — the chain replaces
+  them.
+- **`resolve_llm_model()` reads the gateway config** (`agents.defaults.model.*`),
+  so the effective model follows the operator's real default instead of a copy.
+- **`scripts/sync-skill.sh` ships `hybrid-search/llm_resolution.py`** and the new
+  test files to the installed skill. (`llm_resolution.py` had been missing from
+  its `FILES` list: post-sync, each caller's `try/except ImportError` fallback
+  would have silently restored the *old* behaviour — the exact "silent failure"
+  this release removes.)
+- **`trace_extractor.py` imports the module via multi-candidate paths**, so it
+  finds `llm_resolution` from both the repo and the installed skill.
+
+### Fixed
+
+- **Destructive detection bug in `migrate_ontology_subjects.py` (M4-B).**
+  `load_graph()` rebuilt the display key as `name or type`, but the indexer
+  (`hybrid_search.index_jsonl_file`) uses `name or entity.id or type`.
+  `Decision` / `TimelineEvent` nodes carry no `name`, so the migrator produced
+  `' (Decision)'`, matched nothing, and reported **2826 live facts as ghosts**.
+  A single `--apply` would have marked **2406 valid facts `superseded`** and
+  pulled them out of active retrieval. Fix: mirror the indexer exactly (add the
+  id fallback). After the fix: survivors **3871** / ghosts **0** (was 1045 / 2826).
+
+### Housekeeping
+
+- `migrate_subject.py` / `migrate_ontology_subjects.py` marked **APPLIED**
+  (one-shot, already run in production). Kept as re-auditable tools — a dry-run
+  still answers "is anything left to migrate?" in seconds. Not merged.
+- `docs/CHANGELOG-UNRELEASED-V3.6.1.md` was a superseded draft (content fully
+  present in this CHANGELOG, verified line by line) → renamed `_ARCHIVED-*`.
+- Dead orphan log `memory/nightly-extraction.log` (frozen 2026-07-22) archived to
+  `.archive/retired-scripts/nightly-extraction.log.mort-2026-07-23`.
+
+### Verified
+
+- `scripts/release.sh check` green: syntax, frontmatter, loopback guard, and all
+  five test suites pass.
+- Both arbiters resolve to a model the local daemon actually serves.
+- Migrator dry-run on the live DB: `survivors 3871 / ghosts 0`.
+
 ## v3.6.1 — Arbiter follows the operator's real default (2026-10-06)
 
 Follow-up to v3.6.0. That release restored conflict arbitration but still listed
