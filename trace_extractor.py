@@ -23,6 +23,43 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+# Model resolution is centralised in llm_resolution.py (v4.0). The old hard-coded
+# names (`deepseek-v4.1-flash:cloud` for cloud, `qwen2.5:7b` for the local
+# fallback) are gone: both now come from the shared module. The local model
+# survives ONLY as the last link of the shared chain, and its presence is
+# validated before use (spec v4 section 6.1 — never hang on a synchronous pull).
+_HERE = Path(__file__).resolve().parent
+try:
+    sys.path.insert(0, str(_HERE / "hybrid-search"))
+    from llm_resolution import (
+        resolve_llm_model as _resolve_llm_model,
+        fallback_model as _fallback_model,
+    )
+    _HAVE_LLM_RESOLUTION = True
+except ImportError:  # pragma: no cover - defensive: keep extraction runnable
+    _HAVE_LLM_RESOLUTION = False
+
+    def _resolve_llm_model(explicit=None, override_env=None,
+                           require_local_presence=False):
+        return explicit or os.environ.get("TRACE_LLM_MODEL") or "qwen2.5:7b"
+
+    def _fallback_model(require_presence=True):
+        return os.environ.get("TRACE_LLM_FALLBACK_MODEL", "qwen2.5:7b")
+
+
+def _local_fallback_model() -> str:
+    """Local safety-net model. Presence-checked so we never trigger a silent
+    multi-GB Ollama pull (spec v4 section 6.1). Falls back to the plain name only
+    when the resolver module is unavailable."""
+    if _HAVE_LLM_RESOLUTION:
+        try:
+            return _fallback_model(require_presence=True)
+        except RuntimeError as exc:
+            print(f"   [Security] {exc}")
+            print("   [Security] refusing to let Ollama start a synchronous pull")
+            raise
+    return os.environ.get("TRACE_LLM_FALLBACK_MODEL", "qwen2.5:7b")
+
 # PII / secret patterns to scrub before sending text to LLM
 PII_PATTERNS = [
     re.compile(r'gh[pousr]_[A-Za-z0-9]{36}'),                      # GitHub PAT
@@ -383,7 +420,7 @@ def extract_with_llm(text, dry_run=False):
             print("   ⚠️ No Ollama API key available")
             return None
         payload = json.dumps({
-            "model": os.environ.get("TRACE_LLM_MODEL", "deepseek-v4.1-flash:cloud"),
+            "model": os.environ.get("TRACE_LLM_MODEL") or _resolve_llm_model(),
             "messages": [
                 {"role": "system", "content": "You extract structured information from daily notes. Respond ONLY with valid JSON."},
                 {"role": "user", "content": prompt},
@@ -406,8 +443,8 @@ def extract_with_llm(text, dry_run=False):
             return content
 
     def call_ollama(attempt):
-        """Call local Ollama (qwen2.5:7b fallback). Returns raw content or None."""
-        model = os.environ.get("TRACE_LLM_FALLBACK_MODEL", "qwen2.5:7b")
+        """Call the local Ollama fallback. Returns raw content or None."""
+        model = os.environ.get("TRACE_LLM_FALLBACK_MODEL") or _local_fallback_model()
         payload = json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": prompt}],

@@ -61,7 +61,26 @@ DEFAULT_BUFFER = "/tmp/auto_captured_facts.jsonl"
 
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-DEFAULT_MODEL = os.environ.get("AUTO_CAPTURE_MODEL", "qwen2.5:7b")
+# Model resolution is centralised in llm_resolution.py (v4.0): the model comes
+# from agents.defaults.model.primary (gateway config), not a hard-coded name.
+# Decision 2026-10-10: auto_capture follows the default LLM too — the old
+# `qwen2.5:7b` default is gone. The local model survives ONLY as the last link
+# of the shared fallback chain.
+try:
+    from llm_resolution import resolve_llm_model as _resolve_llm_model
+
+except ImportError:  # pragma: no cover - defensive: keep capture runnable
+    def _resolve_llm_model(explicit=None, override_env=None,
+                           require_local_presence=False):
+        return explicit or os.environ.get("AUTO_CAPTURE_MODEL") or "qwen2.5:7b"
+
+
+def _default_model() -> str:
+    """Resolve the model the capture uses (single source of truth)."""
+    return _resolve_llm_model(override_env="AUTO_CAPTURE_MODEL")
+
+
+DEFAULT_MODEL = _default_model()
 GEN_TIMEOUT = int(os.environ.get("AUTO_CAPTURE_TIMEOUT", "60"))
 
 CAPTURE_PROMPT = """Tu es un extracteur de mémoire pour un agent personnel.

@@ -92,41 +92,24 @@ def get_safe_ollama_url(env_var: str, default: str) -> str:
 
 
 OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
-# A bare "glm-5.2" was sent while the installed model is "glm-5.2:cloud": Ollama
-# answered 404 and the advisor silently produced nothing. Same defect as
-# conflict_resolver.LLM_MODEL, found together (2026-10-06). Resolve against the
-# models the daemon actually serves so it cannot rot again on a model swap.
-# Preference follows the operator's real default (agents.defaults.model.primary
-# = deepseek-v4.1-flash cloud, set 2026-10-09: flash everywhere, Pro kept only as
-# an emergency fallback), not the v2.2.0-era hard-coded "glm-5.2" that silently
-# disabled this advisor.
-PREFERRED_MODELS = (
-    "deepseek-v4.1-flash:cloud",
-    "deepseek-v4-pro:cloud",
-    "glm-5.2:cloud",
-    "qwen2.5:7b",
-)
+# Model resolution is centralised in llm_resolution.py (v4.0). The old local
+# PREFERRED_MODELS tuple + resolve_llm_model() were a copy of conflict_resolver's,
+# and that duplication broke production twice (a hard-coded "glm-5.2" answering
+# 404 silently disabled this advisor). The single source of truth is now
+# agents.defaults.model.primary, read from the gateway config.
+# Import is tolerant so this script still runs if the module is absent.
+try:
+    from llm_resolution import resolve_llm_model as _resolve_llm_model
+
+except ImportError:  # pragma: no cover - defensive: keep the advisor runnable
+    def _resolve_llm_model(explicit=None, override_env=None,
+                           require_local_presence=False):
+        return explicit or os.environ.get("OLLAMA_MODEL") or "qwen2.5:7b"
 
 
 def resolve_llm_model(explicit: str | None = None) -> str:
-    """Pick a model Ollama can actually serve (never an unknown name)."""
-    if explicit:
-        return explicit
-    try:
-        url = OLLAMA_URL.rstrip("/") + "/api/tags"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
-    except Exception:
-        names = set()
-    if not names:
-        return PREFERRED_MODELS[0]
-    for cand in PREFERRED_MODELS:
-        if cand in names:
-            return cand
-    for name in sorted(names):
-        if "embed" not in name:
-            return name
-    return PREFERRED_MODELS[0]
+    """Pick the model to use, from llm_resolution (single source of truth)."""
+    return _resolve_llm_model(explicit=explicit, override_env="OLLAMA_MODEL")
 
 
 OLLAMA_MODEL = resolve_llm_model(os.environ.get("OLLAMA_MODEL"))

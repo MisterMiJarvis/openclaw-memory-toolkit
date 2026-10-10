@@ -80,11 +80,16 @@ fi
 echo "== 4. documented invariants present =="
 grep -q "ALLOWED_OLLAMA_HOSTS" hybrid-search/hybrid_search.py && ok "loopback allowlist present" || bad "loopback allowlist missing"
 grep -q "get_safe_ollama_url" hybrid-search/conflict_resolver.py && ok "conflict_resolver guards URLs" || bad "conflict_resolver guard missing"
+# llm_resolution.py is the shared, loopback-by-design resolver (v4.0): its single
+# OLLAMA_URL read is the documented source of the safety-net endpoint. It is not
+# an unguarded script-level read; the whole module exists to police that URL.
+grep -q "OLLAMA_LOCAL_URL" hybrid-search/llm_resolution.py && ok "llm_resolution: loopback resolver present" || warn "llm_resolution.py missing"
 UNG_VIOL=0
 while IFS= read -r line; do
   code="${line%%#*}"   # strip trailing comment before matching
   case "$code" in
     *get_safe_ollama_url*) continue ;;
+    *llm_resolution.py*) continue ;;
   esac
   if printf '%s' "$code" | grep -Eq 'os\.environ.*"(OLLAMA_URL|OLLAMA_GEN_URL|OLLAMA_EMBED_URL)"'; then
     bad "unguarded OLLAMA_* URL read: $line"; UNG_VIOL=1

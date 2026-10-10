@@ -94,51 +94,25 @@ OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://localhost:11434")
 # generated URL is derived from the already-validated OLLAMA_URL, so the default
 # remains loopback and any explicit override must pass the allowlist too.
 OLLAMA_GEN_URL = get_safe_ollama_url("OLLAMA_GEN_URL", OLLAMA_URL.rstrip("/") + "/api/generate")
-# The arbiter LLM name. A bare "glm-5.2" was sent while the installed model is
-# "glm-5.2:cloud" — Ollama answered 404, classify_relation fell through to the
-# conservative heuristic, and EVERY fact came back `COMPATIBLE / no confident
-# relation detected`. Conflict arbitration was therefore dead on arrival: the
-# superseded/disputed paths had never executed once.
-#
-# A hard-coded name rots again on the next model swap, so we resolve it against
-# the models the daemon actually serves. Precedence: explicit env vars -> the
-# first served model from this preference list.
-#
-# The list follows the operator's real default (agents.defaults.model.primary
-# = deepseek-v4.1-flash cloud, set 2026-10-09: flash everywhere, Pro kept only as
-# an emergency fallback), NOT the v2.2.0-era hard-coded "glm-5.2" that had
-# silently disabled arbitration until v3.6.0.
-PREFERRED_MODELS = (
-    "deepseek-v4.1-flash:cloud",
-    "deepseek-v4-pro:cloud",
-    "glm-5.2:cloud",
-    "qwen2.5:7b",
-)
+# Model resolution is centralised in llm_resolution.py (v4.0). The old local
+# PREFERRED_MODELS tuple + resolve_llm_model() were a copy of consolidate_advisor's,
+# and that duplication broke arbitration: a hard-coded "glm-5.2" answered 404,
+# classify_relation fell through to the conservative heuristic, and every fact
+# came back COMPATIBLE — arbitration was dead on arrival. Single source of truth
+# is now agents.defaults.model.primary, read from the gateway config.
+# Import is tolerant so this script still runs if the module is absent.
+try:
+    from llm_resolution import resolve_llm_model as _resolve_llm_model
+
+except ImportError:  # pragma: no cover - defensive: keep arbitration runnable
+    def _resolve_llm_model(explicit=None, override_env=None,
+                           require_local_presence=False):
+        return explicit or os.environ.get("CONFLICT_LLM_MODEL") or "qwen2.5:7b"
 
 
 def resolve_llm_model(explicit: str | None = None) -> str:
-    """Pick a model that Ollama can actually serve.
-
-    Never returns a name the daemon does not know: a 404 here silently disables
-    arbitration, which is exactly the regression fixed in v3.6.0.
-    """
-    if explicit:
-        return explicit
-    try:
-        url = OLLAMA_URL.rstrip("/") + "/api/tags"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
-    except Exception:
-        names = set()
-    if not names:
-        return PREFERRED_MODELS[0]
-    for cand in PREFERRED_MODELS:
-        if cand in names:
-            return cand
-    for name in sorted(names):
-        if "embed" not in name:  # an embedder would never answer a chat prompt
-            return name
-    return PREFERRED_MODELS[0]
+    """Pick the model to use, from llm_resolution (single source of truth)."""
+    return _resolve_llm_model(explicit=explicit, override_env="CONFLICT_LLM_MODEL")
 
 
 LLM_MODEL = resolve_llm_model(
