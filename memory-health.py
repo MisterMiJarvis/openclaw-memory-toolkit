@@ -155,7 +155,14 @@ def check_ontology():
         try:
             entry = json.loads(line)
             op = entry.get("op")
-            if op in ("create", "upsert"):
+            # ``state`` is the dominant write in the live graph (the ontology
+            # writer emits one state record per entity snapshot); ``create`` and
+            # ``upsert`` are the older/simpler forms. Counting only create/upsert
+            # made every relation look orphaned once the writer switched to
+            # ``state`` — the health check screamed "68 orphan relations" while
+            # ontology_compact.py, which replays the full log, saw zero. Accept
+            # all three so both tools agree on the same entity set.
+            if op in ("create", "upsert", "state"):
                 # Handle both entity and relation-style entries
                 # upsert = create if not exists, update if exists
                 if "entity" in entry:
