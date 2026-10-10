@@ -193,9 +193,88 @@ def assistant_turn_is_echo(assistant_msg: str) -> bool:
     return any(p.search(msg) for p in ASSISTANT_ECHO_PATTERNS)
 
 
+# ─── Self-referential / meta-noise gate ────────────────────────────────────────
+#
+# M5 (v3.7): the M4 echo guard (assistant_turn_is_echo) catches MACHINE-GENERATED
+# turns (tool logs, cron payloads, status lines). It does NOT catch a turn written
+# in fluent natural language whose SUBJECT is the memory system itself. Observed
+# 2026-10-09: the pipeline captured «il y a trois jobs qui touchent la mémoire
+# chaque nuit» — a true sentence, but pure meta-noise about the agent's own
+# plumbing. Storing it as a durable fact about the user is an echo loop: the
+# toolkit feeding on its own description.
+#
+# Strategy: drop the assistant half (keep the user half, exactly like M4) when the
+# text is self-referential. Two independent signals, either is sufficient:
+#   1. The text mentions the memory toolkit's own machinery (jobs, nightly,
+#      extraction, pipeline, trace-extractor, ClawHub, skill, ontology, ...).
+#   2. The text is dominated by first-person-plural agent voice AND names a
+#      self-referential object (our pipeline, this skill, the memory base ...).
+# A genuine user fact can mention "mémoire" incidentally; that is why signal 1
+# alone only fires when the memory vocabulary is DENSE (>= 2 distinct hits), so
+# "j'ai une bonne mémoire" or "note que ma mémoire me joue des tours" survive.
+
+# Terms that are UNAMBIGUOUSLY about this toolkit's own machinery. One hit is
+# enough: no human sentence about their own life names `trace-extractor` or
+# `graph.jsonl`.
+_META_STRONG = re.compile(
+    r"\b(trace[- ]?extractor|memory[- ]?toolkit|memory[- ]?health|hybrid[- ]?search|"
+    r"auto[- ]?capture|auto[- ]?archive|conflict[- ]?resolver|consolidate[- ]?advisor|"
+    r"clawhub|graph\.jsonl|agent_memory|nightly[- ]?extraction|ontology\b|"
+    r"ontologie|dedup(?:lication)?|d[ée]dup(?:lication)?|arbitrage|supers[èe]d(?:e|es|ing)?|"
+    r"base m[ée]moire|m[ée]moire long(?:ue)? terme|store de faits|toolkit|extracteur)\b",
+    re.I,
+)
+# Terms that are ambiguous alone (a user CAN have "jobs", "un pipeline", "une
+# skill"). They only count as meta-noise when the *phrasing* is the agent
+# speaking about its own system (see _AGENT_VOICE) or when several co-occur.
+_META_WEAK = re.compile(
+    r"\b(jobs?|nightly|extraction|pipeline|skill|scoring|m[ée]moire|faits)\b",
+    re.I,
+)
+# Agent voice about its own machinery: a definite article + a system noun, or an
+# explicit recurrence marker. "mon pipeline de données Astro" (a real project)
+# does NOT match; "le pipeline" / "les jobs" / "chaque nuit" does.
+_AGENT_VOICE = re.compile(
+    r"\b(le pipeline|l'extraction|le toolkit|la skill|la base|le store|"
+    r"les jobs|les faits|le job|cette nuit|chaque nuit|toutes les nuits|"
+    r"tourne(?:nt)? (?:chaque|toutes les) nuit|il y a \w+ jobs)\b",
+    re.I,
+)
+
+
+def text_is_self_referential(text: str) -> bool:
+    """True when the text talks about the memory system itself (meta-noise).
+
+    M5 gate. Returns False for an empty string (never gate a legitimately empty
+    turn). Fires when EITHER:
+      * two or more DIFFERENT meta terms are present (dense memory vocabulary), or
+      * one meta term is present AND the phrasing is agent-voice about its own
+        machinery ("le pipeline", "les jobs", "la base", "chaque nuit").
+    A single incidental mention in ordinary user prose ("note que ma mémoire...")
+    does not fire.
+    """
+    msg = (text or "").strip()
+    if not msg:
+        return False
+    # One unambiguous toolkit term is enough.
+    if _META_STRONG.search(msg):
+        return True
+    weak_hits = {m.group(0).lower() for m in _META_WEAK.finditer(msg)}
+    # Two different ambiguous terms together = dense memory vocabulary.
+    if len(weak_hits) >= 2:
+        return True
+    # A single ambiguous term only fires in the agent's own voice.
+    if weak_hits and _AGENT_VOICE.search(msg):
+        return True
+    return False
+
+
 def should_capture(user_msg: str) -> bool:
     """Decide whether an exchange is worth analysing."""
     if is_trivial(user_msg):
+        return False
+    # M5: never mine the agent's own plumbing for user facts.
+    if text_is_self_referential(user_msg):
         return False
     # If there is an explicit signal, definitely capture.
     if has_signal(user_msg):
