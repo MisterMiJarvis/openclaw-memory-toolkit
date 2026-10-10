@@ -150,12 +150,21 @@ def llm_destination() -> tuple[str, str]:
     OLLAMA_API_KEY environment variable, so a key sourced from the secrets file
     or openclaw.json made the banner claim "local fallback" while the content
     was in fact posted to ollama.com. The lookup order is now shared.
+
+    CONSENT (v4.0.1): cloud transport is OPT-IN. A configured API key alone is
+    no longer enough — the operator must also set TRACE_LLM_ALLOW_CLOUD=1. A
+    memory skill that silently ships notes off-machine just because a key
+    happens to exist surprises the user; defaulting to local keeps the behaviour
+    predictable. TRACE_LLM_LOCAL_ONLY=1 still wins as a hard local-only lock.
     """
     if os.environ.get("TRACE_LLM_LOCAL_ONLY", "").strip() in ("1", "true", "yes"):
         return ("local", "local Ollama (127.0.0.1:11434) — forced by TRACE_LLM_LOCAL_ONLY")
     source, _key = _find_ollama_api_key_sources()
-    if source:
+    if source and os.environ.get("TRACE_LLM_ALLOW_CLOUD", "").strip() in ("1", "true", "yes"):
         return ("cloud", f"Ollama cloud (ollama.com) — key from {source} — content leaves this machine")
+    if source:
+        return ("local", "local Ollama (127.0.0.1:11434) — API key present but cloud not opted in "
+                         "(set TRACE_LLM_ALLOW_CLOUD=1 to allow)")
     # No key anywhere: the cloud call is skipped and the local fallback is used.
     return ("local", "local Ollama (127.0.0.1:11434) — no API key configured")
 
@@ -316,10 +325,12 @@ def extract_with_llm(text, dry_run=False):
     """Use LLM (Ollama cloud primary, Ollama local fallback) to extract structured info.
 
     SECURITY / DISCLOSURE: memory and session content IS transmitted to an LLM.
-      - Primary transport is Ollama cloud (https://ollama.com) when an API key is
-        configured: content LEAVES this machine.
-      - Local fallback is Ollama at 127.0.0.1:11434: content stays on the machine.
-      - Set TRACE_LLM_LOCAL_ONLY=1 to force local-only and refuse cloud calls.
+      - Primary transport is Ollama cloud (https://ollama.com) ONLY when an API key
+        is configured AND the operator sets TRACE_LLM_ALLOW_CLOUD=1: content LEAVES
+        this machine (opt-in, v4.0.1).
+      - Otherwise: local Ollama at 127.0.0.1:11434, content stays on the machine.
+      - Set TRACE_LLM_LOCAL_ONLY=1 to force local-only and refuse cloud calls even
+        when cloud was opted in (hard lock).
     Text is sanitized (sanitize_pii) before submission, but regex scrubbing is
     best-effort, NOT a guarantee. Do not feed raw secret material to this function.
     """
@@ -421,9 +432,16 @@ def extract_with_llm(text, dry_run=False):
 
         REFUSES to run when TRACE_LLM_LOCAL_ONLY is set: the local-only mode must
         not silently fall back to a transport that leaves the machine.
+
+        CONSENT (v4.0.1): cloud is opt-in. Even with an API key present, the call
+        is refused unless TRACE_LLM_ALLOW_CLOUD=1 — so a stray key in the
+        environment can never ship memory content off-machine on its own.
         """
         if os.environ.get("TRACE_LLM_LOCAL_ONLY", "").strip() in ("1", "true", "yes"):
             print("   [Security] TRACE_LLM_LOCAL_ONLY=1 — cloud call refused (local-only mode)")
+            return None
+        if os.environ.get("TRACE_LLM_ALLOW_CLOUD", "").strip() not in ("1", "true", "yes"):
+            print("   [Security] TRACE_LLM_ALLOW_CLOUD not set — cloud call refused (local by default)")
             return None
         api_key = get_ollama_api_key()
         if not api_key:

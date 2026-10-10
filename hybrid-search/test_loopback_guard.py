@@ -22,6 +22,11 @@ URL_GUARDS = [
     ("hybrid_search", "OLLAMA_EMBED_URL", "http://evil.example.com:11434"),
     ("conflict_resolver", "OLLAMA_URL", "http://evil.example.com:11434"),
     ("conflict_resolver", "OLLAMA_GEN_URL", "http://evil.example.com/api/generate"),
+    # v4.0.1: llm_resolution.py was previously exempted from the static scan
+    # (`if fn == "llm_resolution.py": continue`) while reading OLLAMA_URL
+    # unguarded — a real SSRF gap. It now uses get_safe_ollama_url() like the
+    # others, and is guarded here so the exemption can never come back.
+    ("llm_resolution", "OLLAMA_URL", "http://evil.example.com:11434"),
 ]
 
 # Every OLLAMA_* variable name that reaches a network sink in this codebase.
@@ -100,11 +105,6 @@ def test_no_unguarded_ollama_reads():
                     if var in ("OLLAMA_API_KEY", "OLLAMA_MODEL"):
                         continue
                     if "get_safe_ollama_url" in line:
-                        continue
-                    # llm_resolution.py is the shared, loopback-by-design resolver:
-                    # its single OLLAMA_URL read is the documented source of the
-                    # safety-net endpoint, policed by the module itself.
-                    if fn == "llm_resolution.py":
                         continue
                     failures.append(f"{os.path.relpath(path, os.path.dirname(HERE))}:{i}: unguarded {var} read")
     return failures

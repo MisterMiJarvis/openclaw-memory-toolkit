@@ -2,9 +2,29 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
-## v4.0.1 — Clear the static-analysis false positive (2026-10-10)
+## v4.0.1 — Security hardening + static-analysis false positives (2026-10-10)
 
-No behaviour change. ClawHub's static analysis flagged
+### Real fixes
+
+**A. Loopback guard on `llm_resolution.py` (SSRF gap).** The v4.0 resolver read
+`OLLAMA_URL` straight from the environment, while every other module routes it
+through `get_safe_ollama_url()`. It was even *exempted* from the static scan in
+`test_loopback_guard.py` (`if fn == "llm_resolution.py": continue`). A crafted
+environment could therefore point the safety-net endpoint at a remote host. It
+now uses the same loopback guard, and the exemption is removed —
+`llm_resolution` is covered by the guard test like the other modules.
+
+**B. Cloud transport is now opt-in.** `trace_extractor.py` used to send memory
+and session excerpts to `ollama.com` whenever an API key was *present*. A memory
+skill that ships notes off-machine just because a key happens to exist is a
+consent surprise. Cloud is now used only when the operator explicitly sets
+`TRACE_LLM_ALLOW_CLOUD=1` **in addition** to the key; otherwise extraction stays
+on `127.0.0.1:11434`. `TRACE_LLM_LOCAL_ONLY=1` remains a hard local-only lock.
+The disclosure banner reflects the real transport in all cases.
+
+### Clearing a scanner false positive
+
+ClawHub's static analysis flagged
 `hybrid-search/test_ontology_key_parity.py:61` as
 `suspicious.dynamic_code_execution` (critical). It is a false positive: the
 flagged call is the standard Python import machinery loading a **fixed, literal**
@@ -17,6 +37,25 @@ copy. An inline explanation and a `noqa` marker were added instead.
 
 Also ignores `hybrid-search/FULL_INDEX_REPORT.md` (a run artifact, like
 `test_results.json`).
+
+### Known false positives (documented, not fixed)
+
+Further SkillSpector findings are scanner artefacts and are recorded here so a
+future review does not waste time re-triaging them:
+
+- **"Tainted flow … credential exfiltration" (Critical, ×5).** The flagged
+  values are `OLLAMA_URL`, `GEN_TIMEOUT` and a `Content-Type` header — not
+  secrets. The one genuine nugget was the missing loopback guard on
+  `llm_resolution.py` (fixed above).
+- **"Anti-Refusal Statement" (CHANGELOG).** Prose describing the
+  `resolve --confirm` feature; the scanner matched the words "supersedes any
+  rival claim". Not an instruction.
+- **"Credential Access" (CHANGELOG, ×4).** The quoted text is the *refusal* list
+  (`/etc/passwd`, `.secrets/*`, `SOUL.md` … are rejected). The scanner matched the
+  words, not the meaning. This is a security *proof* read as a crime.
+- **"Referenced artifact was not completely inspected" (SKILL.md).** The skill
+  documents modules (e.g. `hybrid_search.py`) that live outside the scanned
+  bundle; the scanner cannot open what was not shipped.
 
 ## v4.0 — One resolver, one truth (2026-10-10)
 

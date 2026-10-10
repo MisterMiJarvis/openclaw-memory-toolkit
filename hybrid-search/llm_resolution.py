@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from functools import lru_cache
 from pathlib import Path
@@ -60,9 +61,35 @@ from pathlib import Path
 # The local safety net. Loopback only, free, always the last link in the chain.
 LOCAL_SAFETY_MODEL = "qwen2.5:7b"
 
-# Local Ollama endpoint. Mirrors the loopback allowlist used elsewhere in the
-# toolkit; never a remote host.
-OLLAMA_LOCAL_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+# Loopback allowlist — same guard as hybrid_search.py / conflict_resolver.py /
+# auto_capture.py / consolidate_advisor.py. A remote OLLAMA_URL would let memory
+# content be POSTed off-machine, so it is refused at import time.
+ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def get_safe_ollama_url(env_var: str, default: str) -> str:
+    """Validate and return an OLLAMA URL, restricting it to loopback only.
+
+    Mirrors the guard in the other toolkit modules: the destination is fixed to
+    localhost at import time, so a remote endpoint cannot receive memory content.
+    """
+    raw_url = os.environ.get(env_var, default)
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Invalid scheme for {env_var}: {parsed.scheme}")
+    hostname = parsed.hostname or ""
+    if hostname not in ALLOWED_OLLAMA_HOSTS:
+        raise ValueError(
+            f"Host '{hostname}' not allowed for {env_var}. Only localhost is permitted."
+        )
+    return raw_url
+
+
+# Local Ollama endpoint. Loopback-only, enforced by the same guard the other
+# modules use; never a remote host.
+OLLAMA_LOCAL_URL = get_safe_ollama_url(
+    "OLLAMA_URL", "http://127.0.0.1:11434"
+).rstrip("/")
 
 # Gateway config path (override with OPENCLAW_CONFIG for tests).
 CONFIG_PATH = Path(
