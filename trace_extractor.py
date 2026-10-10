@@ -201,9 +201,17 @@ SECURITY RULES (MANDATORY):
    entity, and never invent an entity absent from the note. If truly no entity
    fits, use "general". The subject is what lets the conflict resolver detect
    that a later note contradicts an earlier one.
+9. RELATED_TO (M6): every item MUST carry a `related_to` — the id of an EXISTING
+   entity this item attaches to (a Project, Person, Service, Skill or Device
+   already present in the note's context). An item is not a free-floating fact:
+   tie it to what it is about. The id must be lowercase with words joined by
+   underscores (e.g. astrocapture, home_assistant, maison_jeanne, kavita).
+   It MUST be grounded in the note text — never invented. If genuinely nothing
+   fits, use "daily_notes" (the catch-all root). An item with no relation is
+   an orphan, and orphans are the graphe's main defect (889/928 on 10/10/2026).
 
 Return ONLY valid JSON. No markdown. No code fences. No extra text. Just the JSON object:
-{"decisions":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"errors":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"facts":[{"what":"short description","subject":"entity_key","date":"YYYY-MM-DD"}],"promote_to_memory":["items worth promoting to MEMORY.md"]}
+{"decisions":[{"what":"short description","subject":"entity_key","related_to":"existing_entity_id","date":"YYYY-MM-DD"}],"errors":[{"what":"short description","subject":"entity_key","related_to":"existing_entity_id","date":"YYYY-MM-DD"}],"facts":[{"what":"short description","subject":"entity_key","related_to":"existing_entity_id","date":"YYYY-MM-DD"}],"promote_to_memory":["items worth promoting to MEMORY.md"]}
 
 DAILY NOTES:
 """
@@ -726,11 +734,81 @@ def upsert_entities(records):
     tmp.replace(ONTOLOGY_FILE)
     return len(incoming)
 
+def _norm_related_to(item) -> "str | None":
+    """Normalise an extracted item's `related_to` into a candidate root id.
+
+    M6: the extraction prompt now requires a `related_to` — the id of an existing
+    entity the item attaches to. Without this, every extracted fact becomes an
+    orphan (889/928 on 10/10/2026). We normalise the same way as the subject
+    (lowercase, words -> underscores) and REQUIRE it to be grounded in the item
+    text, so the LLM cannot invent a root that does not exist in the note.
+    Returns None when nothing grounds.
+    """
+    if not isinstance(item, dict):
+        return None
+    raw = str(item.get("related_to") or "").strip().lower()
+    if not raw:
+        return None
+    raw = re.sub(r"[^a-z0-9_]+_", "_", re.sub(r"\s+", "_", raw)).strip("_")
+    what = str(item.get("what") or item.get("content") or "").strip().lower()
+    if not what:
+        return None
+    tokens = [t for t in re.split(r"[^\w]+", raw.replace("_", " ")) if len(t) >= 3]
+    text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", what.lower())) | set(
+        re.findall(r"[\w\u00c0-\u00ff]+", str(item.get("subject") or "").lower()))
+    grounded = [t for t in tokens if t in text_words]
+    if grounded:
+        return "_".join(grounded[:2])
+    # Not grounded in the item text -> do not invent a root.
+    return None
+
+
+def _root_id_for(item, existing_ids) -> "str | None":
+    """Resolve the root an item should attach to.
+
+    Order: the extracted `related_to` (if it names a KNOWN entity), the subject
+    (same rule), then None. Never returns an id absent from the ontology unless
+    it is the explicit catch-all, which write_ontology_entities() will create.
+    """
+    for key in ("related_to", "subject"):
+        cand = _norm_related_to({"related_to": item.get(key), "what": item.get("what"),
+                                 "subject": item.get("subject")}) if key == "related_to" \
+               else _norm_subject(item)
+        if cand and cand in existing_ids:
+            return cand
+    return None
+
+
 def write_ontology_entities(extractions):
-    """Add new entities to ontology from extractions, using upsert to avoid duplicates."""
+    """Add new entities to ontology from extractions, using upsert to avoid duplicates.
+
+    M6: each decision is ALSO attached to a root entity via a ``relate`` fact, so
+    it never lands as an orphan. The root comes from the extracted ``related_to``
+    (grounded against the item text) or the ``subject``; when neither names a
+    known entity we fall back to the catch-all root ``daily_notes``, which is
+    created on first use. A node without an edge is the graphe's main defect.
+    """
     existing_ids = load_ontology_ids()
     new_entities = []
-    
+    new_relations = []
+
+    # Ensure the catch-all root exists so a fallback link is always possible.
+    CATCH_ALL = "daily_notes"
+    if CATCH_ALL not in existing_ids:
+        new_entities.append({
+            "op": "upsert",
+            "entity": {
+                "id": CATCH_ALL,
+                "type": "Concept",
+                "properties": {
+                    "name": "Daily notes (catch-all root)",
+                    "description": "Root for extracted facts with no better anchor.",
+                    "source": "trace-extraction",
+                },
+            },
+        })
+        existing_ids.add(CATCH_ALL)
+
     for dec in extractions.get("decisions", []):
         what = dec.get("what", "") if isinstance(dec, dict) else dec
         # Create a clean ID from the decision
@@ -749,11 +827,34 @@ def write_ontology_entities(extractions):
                 }
             })
             existing_ids.add(entity_id)
-    
+        # Attach to a root (never leave the decision orphaned).
+        if isinstance(dec, dict):
+            root = _root_id_for(dec, existing_ids) or CATCH_ALL
+            new_relations.append({
+                "op": "relate", "from": entity_id, "rel": "relates_to", "to": root,
+                "properties": {
+                    "evidence": "auto-link at extraction (M6 related_to contract)",
+                    "source": "trace-extraction",
+                    "valid_from": date.today().isoformat(),
+                },
+            })
+
     if new_entities:
         upsert_entities(new_entities)
-    
+    if new_relations:
+        _append_relations(new_relations)
+
     return len(new_entities)
+
+
+def _append_relations(relations):
+    """Append ``relate`` facts to the ontology log. Never rewrites or deletes."""
+    if not relations:
+        return 0
+    with ONTOLOGY_FILE.open("a", encoding="utf-8") as fh:
+        for rel in relations:
+            fh.write(json.dumps(rel, ensure_ascii=False, sort_keys=True) + "\n")
+    return len(relations)
 
 
 def write_timeline_events(extractions):

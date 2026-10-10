@@ -2,6 +2,34 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.4 — No decision enters the ontology as an orphan (2026-10-10)
+
+### Real fix
+
+**M6: every extracted decision now carries an edge.** The ontology held
+**889 orphan entities out of 928, with only 34 relations** — a list of
+disconnected blocks, not a graph. Root cause: `trace_extractor` created
+Decision / TimelineEvent nodes with no relation at all.
+
+Two changes, both at the source:
+
+- The extraction prompt now REQUIRES a `related_to` on every item — the id of an
+  existing entity it attaches to, grounded in the note text, never invented.
+  When nothing fits, the item anchors to the catch-all root `daily_notes`.
+- `write_ontology_entities()` appends a `relate` fact for every decision it
+  writes, resolving the root via `_norm_related_to()` (grounded anchors only)
+  then `_root_id_for()`. An invented anchor is refused, not wired.
+
+Nothing is deleted: the graph stays append-only, and every auto-link is
+reversible.
+
+### New guard
+
+`hybrid-search/test_orphan_link.py`, wired into `scripts/release.sh`. It asserts
+both directions: a grounded anchor links, an ungrounded decision still links to
+`daily_notes`, and an INVENTED anchor is refused. A gate that accepted invented
+roots would silently wire the graph wrong.
+
 ## v4.0.3 — MEMORY.md can no longer grow unbounded (2026-10-10)
 
 ### Real fix
