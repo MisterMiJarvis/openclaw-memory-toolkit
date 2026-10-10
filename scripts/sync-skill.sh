@@ -29,6 +29,7 @@ FILES=(
   hybrid-search/test_loopback_guard.py
   hybrid-search/test_model_resolution.py
   hybrid-search/test_extract_atomic.py
+  hybrid-search/test_ontology_key_parity.py
   hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
   docs/SECURITY-AUDIT-NOTES.md
   scripts/release.sh

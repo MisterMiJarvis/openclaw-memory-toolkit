@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+# APPLIED — one-shot migration, already run in production (2026-10-05).
+# Kept as a re-auditable tool: the --apply path is idempotent, and a
+# dry-run still answers "is there anything left to migrate?" in seconds.
+# As of 2026-10-10 the answer is NO: subject IS NULL / active rows are
+# all `archive/` or `daily-note` (out of derive_subject's scope by design).
+
 """Migrate existing rows to v3.3 subject keys — deterministic, no LLM.
 
 M4 root cause: `add_memory()` never accepted a `subject`, so all 4 937 facts were

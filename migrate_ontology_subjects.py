@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+# APPLIED — one-shot migration, already run in production (2026-10-05).
+# Kept as a re-auditable tool: the --apply path is idempotent, and a
+# dry-run still answers "is there anything left to migrate?" in seconds.
+# As of 2026-10-10 the answer is NO: subject IS NULL / active rows are
+# all `archive/` or `daily-note` (out of derive_subject's scope by design).
+
 """Migration M4-B — ontology nodes: real entity id as subject, ghost nodes archived.
 
 Reality check that triggered this script (dry-run output):
@@ -44,7 +51,22 @@ def backup(db_path: str) -> str:
 
 
 def load_graph(graph_path: str) -> dict:
-    """Return {display_key: entity_id} for every live entity in the oplog."""
+    """Return {display_key: entity_id} for every live entity in the oplog.
+
+    The display key MUST reproduce the one the indexer writes, or every node
+    without a `name` is mis-read as a ghost. `hybrid_search.index_jsonl_file()`
+    builds it as:
+
+        name = properties.name or entity.name or entity.id
+        content = f"{name} ({type})"
+
+    The `or entity.id` fallback is the critical part: Decision / TimelineEvent
+    nodes carry no `name` at all, so the indexer falls back to the id and stores
+    e.g. `dec_2026-05-29_0772 (Decision)`. An earlier version of this loader
+    omitted that fallback, produced `' (Decision)'`, matched nothing, and would
+    have marked 2406 live facts as ghosts. Keep this in lockstep with the
+    indexer (regression guard: hybrid-search/test_ontology_key_parity.py).
+    """
     ent = {}
     p = Path(graph_path)
     if not p.exists():
@@ -61,7 +83,8 @@ def load_graph(graph_path: str) -> dict:
         if not e or not e.get("id"):
             continue
         props = e.get("properties") or {}
-        name = props.get("name") or e.get("name") or ""
+        # Mirror the indexer EXACTLY, including the id fallback.
+        name = props.get("name") or e.get("name") or e.get("id") or ""
         typ = e.get("type") or ""
         ent[NODE_KEY(name, typ)] = e["id"]
     return ent

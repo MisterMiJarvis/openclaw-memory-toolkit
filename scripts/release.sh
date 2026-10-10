@@ -30,7 +30,8 @@ SYNC_FILES=(
   hybrid-search/hybrid_search.py hybrid-search/compact.py
   hybrid-search/conflict_resolver.py hybrid-search/schema.sql
   hybrid-search/test_loopback_guard.py hybrid-search/test_model_resolution.py
-  hybrid-search/test_meta_gate.py
+  hybrid-search/test_meta_gate.py hybrid-search/test_extract_atomic.py
+  hybrid-search/test_ontology_key_parity.py
   docs/SECURITY-AUDIT-NOTES.md
   hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
 )
@@ -131,6 +132,12 @@ echo "== 6. loopback guard test =="
 
 "$PYBIN" hybrid-search/test_meta_gate.py >/dev/null 2>&1 \
   && ok "test_meta_gate.py passes" || bad "test_meta_gate.py FAILED"
+
+"$PYBIN" hybrid-search/test_extract_atomic.py >/dev/null 2>&1 \
+  && ok "test_extract_atomic.py passes" || bad "test_extract_atomic.py FAILED"
+
+"$PYBIN" hybrid-search/test_ontology_key_parity.py >/dev/null 2>&1 \
+  && ok "test_ontology_key_parity.py passes" || bad "test_ontology_key_parity.py FAILED"
 
 echo "== 7. git hygiene =="
 if [ -n "$(git status --porcelain)" ]; then
