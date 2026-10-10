@@ -2,6 +2,30 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.3 — MEMORY.md can no longer grow unbounded (2026-10-10)
+
+### Real fix
+
+**Size guard in `consolidate_advisor.apply_promotions()`.** MEMORY.md is injected
+into every main-session context and has a hard 5 KB budget, but the promotion
+path appended entries without ever checking the running total. That is how the
+file silently reached **19.6 KB (3.8x the limit)** before a manual audit caught
+it. The writer now projects the post-write size and **refuses to write** when it
+would exceed `MEMORY_MAX_SIZE` (env-overridable, default 5000):
+
+```
+❌ Size guard: refusing to write — projected MEMORY.md 18689 bytes
+   > limit 5000 bytes (+13710 would be added).
+   Trim/archive MEMORY.md first, or promote fewer entries.
+```
+
+The file is left byte-for-byte untouched on refusal. Promotions are suggestions,
+not obligations: losing an overflow is strictly better than paying for it in
+every future session's context.
+
+Verified by direct test: a 2-entry lot applies, a 20-entry lot is refused and
+the file stays intact.
+
 ## v4.0.2 — Ontology health check no longer cries wolf (2026-10-10)
 
 ### Real fix

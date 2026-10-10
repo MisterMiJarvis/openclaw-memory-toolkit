@@ -118,6 +118,10 @@ PROMOTE_THRESHOLD = 2.0
 STALE_THRESHOLD = 0.15
 MIN_CLUSTER_SIZE = 2  # need at least 2 mentions across days to form a cluster
 
+# Same ceiling as memory-health.py: MEMORY.md is injected into every main-session
+# context, so it has a hard budget. Consolidation must never push it past this.
+MEMORY_MAX_SIZE = int(os.environ.get("MEMORY_MAX_SIZE", 5000))
+
 
 def load_scores():
     """Load scores.json if available."""
@@ -567,8 +571,23 @@ def apply_promotions(promotions: list[dict], dry_run: bool = True, force: bool =
 
     # Append to MEMORY.md
     updated = content.rstrip() + "\n" + "\n".join(new_lines) + "\n"
+
+    # ── Size guard ────────────────────────────────────────────────────────
+    # MEMORY.md is injected into every main-session context; an unbounded
+    # append is how it silently grew to 19.6 KB against a 5 KB budget (10/10).
+    # Refuse to write past the ceiling: the overflow would be pure context
+    # cost, and promotions are suggestions, not obligations.
+    projected = len(updated.encode("utf-8"))
+    if projected > MEMORY_MAX_SIZE:
+        print(f"❌ Size guard: refusing to write — projected MEMORY.md "
+              f"{projected} bytes > limit {MEMORY_MAX_SIZE} bytes "
+              f"(+{projected - len(content.encode('utf-8'))} would be added).")
+        print(f"   Trim/archive MEMORY.md first, or promote fewer entries.")
+        return 0
+
     MEMORY_FILE.write_text(updated)
-    print(f"✅ Added {count} promoted entries to MEMORY.md")
+    print(f"✅ Added {count} promoted entries to MEMORY.md "
+          f"({projected}/{MEMORY_MAX_SIZE} bytes)")
     return count
 
 
