@@ -104,10 +104,27 @@ def _daily_root_for(date_str):
     We do NOT point at `daily_notes`: that catch-all does not exist in this
     graph, so an edge to it is a dangling reference, not a fix. A per-day node
     is a real, created anchor, and it keeps the graph queryable by date.
+
+    VALIDATION IS MANDATORY. The property we read is not always a clean date:
+    extraction has written `2026-05-31-0913` (date + time), `2026-05-31-0913-2`
+    (date + time + suffix), `2026-05-26-roadmap-updates` (date + free text) and
+    `2026-04` (month only). Blindly stripping dashes turned those into the
+    garbage ids `day_202605310913` / `day_20260526roadmapupdates` / `day_202604`,
+    which no node can ever match -- dangling edges, not a fix.
+
+    So we parse first, build second. Returns None when no real day can be read.
     """
     if not date_str:
         return None
-    return "day_" + str(date_str).replace("-", "")
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:\b|$)", str(date_str).strip())
+    if not m:
+        return None
+    y, mo, d = m.group(1), m.group(2), m.group(3)
+    try:
+        datetime(int(y), int(mo), int(d))
+    except ValueError:
+        return None
+    return f"day_{y}{mo}{d}"
 
 
 def _text_of(entity):
