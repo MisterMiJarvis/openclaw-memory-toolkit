@@ -34,6 +34,79 @@ Nightly Cron (23h)
 
 All scripts are standalone and composable. Run individually or as a pipeline.
 
+## Benchmark — LoCoMo (v4.0)
+
+Most AI memory benchmarks publish cherry-picked configurations: `top-200` context
+windows, excluded failure modes, or proprietary cloud pipelines. This project
+publishes a **reproducible, glass-box** result — including when it sits below the
+state of the art.
+
+We evaluated the toolkit (100 % local indexing via **SQLite FTS5 BM25 +
+`sqlite-vec` cosine similarity + Reciprocal Rank Fusion at `k=15`**, zero LLM
+calls during ingestion) against the **LoCoMo** long-term conversational memory
+benchmark (`snap-research/locomo`, SHA256 `79fa87e9…ea698ff4`).
+
+### 1. Official Protocol (Categories 1–4)
+
+Standard academic/industry protocol, Category 5 adversarial traps excluded.
+Deterministic retrieval across all 10 conversations (`n = 1,536`) and end-to-end
+QA across 9 validated conversations (`n = 1,386`), using `deepseek-v4.1-flash`
+as both Reader and Judge.
+
+| System | Architecture | LLM Calls at Index Time | Reader / Judge | QA Accuracy (Cat. 1–4) | Execution Scope |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **LangMem** | Agentic Memory | Yes (every turn) | GPT-4o-mini | 48.4% | Cloud API |
+| **OpenClaw Memory Toolkit** | **BM25 + `sqlite-vec` + RRF (`k=15`)** | **None (0 LLM calls)** | **`deepseek-v4.1-flash`** | **49.6%** *(41.4% strict)* | **100% Local-First** |
+| **OpenAI Memory** | Proprietary Assistant Memory | Yes | GPT-4o-mini | 52.9% | Cloud (Closed) |
+| **Mem0** | Fact Extraction + Vector/Graph | Yes (every turn) | GPT-4o-mini | 66.9% – 68.4% | Cloud / Managed |
+| **Letta (MemGPT)** | Agent OS / Multi-step File Search | Agent loops | GPT-4o-mini | 74.0% | High-latency loops |
+| **Zep (Graphiti)** | Bi-temporal Knowledge Graph | Yes (every turn) | GPT-4o-mini | 75.1% | Cloud Graph DB |
+
+### 2. Retrieval vs. QA — Why Retrieval Is the Ceiling
+
+The deterministic retrieval engine (zero LLM cost) achieves:
+
+* **`hit@15`** (at least one gold evidence chunk in top-15): **`65.1%`** (`n = 1,536`)
+* **`all_evidence`** (all required gold chunks in top-15): **`51.6%`**
+* **`MRR`** (mean reciprocal rank): **`0.449`**
+
+| Category | Question Type | Questions (`n`) | Strict (Full Match) | Standard (Partial = ½) | Coverage | Engineering Diagnosis |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Cat. 2** | Temporal Reasoning | 284 | **50.7%** | 54.6% | 58.5% | Strong chronological retention without a heavy temporal graph. |
+| **Cat. 4** | Single-Hop Factual | 768 | **48.2%** | 55.3% | 62.5% | Tracks the `65.1%` `hit@15` retrieval ceiling almost 1:1. |
+| **Cat. 1** | Multi-Hop Synthesis | 250 | **18.8%** | 36.6% | 54.4% | **89 partial hits**: `hit@15` is `65.1%`, but `all_evidence` drops to `51.6%`. The retriever finds pieces of the answer, not the full set. |
+| **Cat. 3** | Open-Domain Inference | 83 | **15.7%** | 19.3% | 22.9% | By design, the reader prompt outputs `INSUFFICIENT` rather than guessing when facts are not explicitly grounded. |
+| **Total** | **Official Protocol (Cat. 1–4)** | **1,386** | **41.4%** | **49.6%** | **57.8%** | **Reader efficiency is 76% of the `hit@15` ceiling (`49.6% / 65.1%`).** |
+
+### 3. Full "Hardcore" Protocol (Categories 1–5, Adversarial Traps Included)
+
+Evaluated on the complete LoCoMo dataset (`n = 1,946` QA / `n = 1,982` retrieval),
+which includes **406 Adversarial questions (Category 5)** designed to trick agents
+into hallucinating false premises:
+
+* **Overall Hardcore Accuracy (Cat. 1–5):** **`57.6%`** (`n = 1,946`)
+* **Category 5 (Adversarial Hallucination Resistance):** **`88.7%`** (`360 / 406` false premises successfully rejected)
+* **Full-Dataset Retrieval (`n = 1,982`):** `hit@15 = 58.2%` · `all_evidence = 47.5%` · `MRR = 0.391`
+
+> **The Hallucination Trade-off (Cat. 3 vs. Cat. 5):** the exact same strictness
+> that penalizes speculative inference in Category 3 (`15.7%` strict) provides an
+> **`88.7%` shield against adversarial traps in Category 5**. For production
+> personal and enterprise agents, we prioritize factual grounding over speculation.
+
+### 4. Next Engineering Milestones (Closing the Retrieval Gap)
+
+Because the reader model is not the bottleneck, the v4.x roadmap focuses strictly
+on lifting the `65.1%` retrieval ceiling and the `51.6%` multi-hop evidence assembly:
+
+1. **Semantic & Dialog-Aware Chunking:** refining turn boundaries and entity anchoring at index time so multi-session facts aren't split across low-ranked chunks.
+2. **Two-Stage Local Reranking:** expanding initial RRF candidate retrieval (`k=40`) followed by a lightweight local cross-encoder to boost `all_evidence` into the final `top-15` window.
+3. **Dual Date Formatting:** preserving both relative conversational expressions ("the Sunday before May 25") and resolved ISO dates to eliminate false negatives in temporal judging.
+
+> **Scope note:** Categories 1–5 figures come from the "hardcore" run (`n = 1,946`);
+the comparable table uses the official Cat. 1–4 protocol (`n = 1,386`). Both are
+measured on the same harness. Raw result files: `locomo-official-2026-10-11-FINAL.json`
+and `locomo-hardcore-2026-10-11-FINAL.json`.
+
 ## Contributing
 
 This README is written for **users**. If you are **maintaining this repository**
