@@ -2,6 +2,43 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.5 — Dates are validated before they reach the graph (2026-10-11)
+
+### Real fix
+
+**The extraction pipeline trusted the LLM's date and folded it into ids.**
+`stable_id('tl', what, today)` concatenated the string blindly, and the
+decision write took `dec.get('date')` verbatim. A model asked for `YYYY-MM-DD`
+still returns `2026-05-31-0913` (date + time), `2026-05-26-roadmap-updates`
+(date + free text) or `2026-04` (month only).
+
+Blind concatenation produced the unmatchable nodes `day_202605310913` /
+`day_20260526roadmapupdates` / `day_202604` — targets no edge can ever match.
+That is the **dangling-target** defect the 10/10 backfill had to repair by hand
+(158 edge targets pointing at nodes that did not exist). It is now fixed at
+the source, so it cannot recur.
+
+### Change
+
+`normalize_date()` is the single gate every date passes before it is written
+or folded into an id:
+
+- **Parse first, build second.** A real calendar date is required —
+  `datetime()` rejects `2026-13-01` and `2026-02-30`; a regex alone would not.
+- A leading `YYYY-MM-DD` in a longer string is kept
+  (`2026-05-31-0913` → `2026-05-31`), the trailing noise is dropped.
+- Anything else falls back — the honest answer for "undated decision" is today,
+  not a fabricated date.
+
+It gates both the id builder (`stable_id`) and the decision-date write. 12 unit
+cases cover the boundary.
+
+### Note on the source of truth
+
+`trace_extractor.py` is the one skill file whose **live copy leads**: the fix
+was written against the running skill then ported live → repo. `release.sh`
+section 2 asserts the two copies are identical.
+
 ## v4.0.4 — No decision enters the ontology as an orphan (2026-10-10)
 
 ### Real fix
