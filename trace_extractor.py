@@ -169,10 +169,46 @@ def llm_destination() -> tuple[str, str]:
     return ("local", "local Ollama (127.0.0.1:11434) — no API key configured")
 
 
+def normalize_date(value, fallback: "str | None" = None) -> "str | None":
+    """Return a clean ``YYYY-MM-DD`` string, or ``fallback`` when unparsable.
+
+    This is the single gate every date passes before it is written to the graph
+    or folded into an entity id. The date often comes from the LLM, and a model
+    asked for ``YYYY-MM-DD`` still returns ``2026-05-31-0913`` (date + time),
+    ``2026-05-26-roadmap-updates`` (date + free text) or ``2026-04`` (month
+    only). Concatenating those straight into an id produced the garbage nodes
+    ``day_202605310913`` / ``day_20260526roadmapupdates`` / ``day_202604`` that
+    no edge can ever match -- the dangling-target defect found on 10/10/2026.
+
+    Parse first, build second: a real calendar date is required (``datetime``
+    rejects 2026-13-01 and 2026-02-30), and the leading ``YYYY-MM-DD`` of a
+    longer string is kept. Anything else falls back (today, at the call site).
+    """
+    if value is None:
+        return fallback
+    s = str(value).strip()
+    if not s:
+        return fallback
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:\b|$)", s)
+    if not m:
+        return fallback
+    try:
+        datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return fallback
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+
 def stable_id(prefix: str, text: str, date_str: str) -> str:
-    """Deterministic entity ID. sha256 is stable across processes (unlike hash())."""
+    """Deterministic entity ID. sha256 is stable across processes (unlike hash()).
+
+    The date is normalised first: an id must never be built by concatenating an
+    unvalidated string (see normalize_date). A malformed date becomes today's
+    date rather than leaking its digits into the id.
+    """
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-    return f"{prefix}_{date_str.replace('-', '')}_{digest}"
+    clean = normalize_date(date_str, date.today().isoformat())
+    return f"{prefix}_{clean.replace('-', '')}_{digest}"
 
 
 WORKSPACE = Path(os.environ.get("WORKSPACE", Path.home() / ".openclaw/workspace"))
@@ -821,7 +857,11 @@ def write_ontology_entities(extractions):
                     "type": "Decision",
                     "properties": {
                         "description": what[:200],
-                        "date": dec.get("date", date.today().isoformat()),
+                        # The LLM's date is untrusted: normalise before it reaches the
+                        # graph. A malformed value ("2026-05-31-0913") otherwise
+                        # becomes an unmatchable node/edge target later. Falls back
+                        # to today, which is the honest answer for "undated decision".
+                        "date": normalize_date(dec.get("date"), date.today().isoformat()),
                         "source": "trace-extraction"
                     }
                 }
