@@ -321,7 +321,49 @@ Catégories baseline : c1 38,7 % (31) · c2 64,8 % (27) · c3 25,0 % (8) · c4 5
 - Cat 4 (+12,8) : effet de bord bienvenu de la règle « Specificity Over Generality ».
 
 ### Run 1b — règle d'inférence cat 3 — À FAIRE
-### Run 2 — Neighbor Turn Expansion (±1/±2) — À FAIRE
+
+### Run 2 — Neighbor Turn Expansion (±1 puis ±2) — FAIT ✅
+Rappel : `expand_neighbours()` était **déjà branchée** dans `qa_score()` (l. 401),
+mais désactivée par défaut (`LOCOMO_EXPAND_WINDOW=0`). Run 2 = activation par env var,
+aucun code à modifier. Fenêtre pilotée par `LOCOMO_EXPAND_WINDOW`.
+
+Trois runs, même conv-41 (n=152), fichiers dans `results/` :
+
+| Run | Prompt Reader | Expand | Fichier | acc | strict | wrong |
+|---|---|---|---|---|---|---|
+| réf. | baseline | 0 | `…-2026-10-11-qa-conv-41.json` | 50,3 % | 40,1 % | 39,5 % |
+| 1a | Run 1a | 0 | (voir §Run 1a) | 60,9 % | 53,9 % | 32,2 % |
+| 2a | baseline | ±1 | `ablation-conv41-Run2a-expand1.json` | 59,5 % | 48,7 % | 29,6 % |
+| 2b | Run 1a | ±1 | `ablation-conv41-Run2b-expand1.json` | 63,8 % | 57,2 % | 29,6 % |
+| **2c** | **Run 1a** | **±2** | `ablation-conv41-Run2c-expand2.json` | **70,7 %** | **61,8 %** | **20,4 %** |
+
+Ventilation par catégorie (acc) :
+
+| cat | réf. | 1a | 2a | 2b | 2c |
+|---|---|---|---|---|---|
+| 1 (multi-saut) | 38,7 % | 48,4 % | 48,4 % | 50,0 % | **56,5 %** |
+| 2 (temporel) | 64,8 % | 70,4 % | 55,6 % | 70,4 % | **77,8 %** |
+| 3 (inférence) | 25,0 % | 31,2 % | 31,2 % | **18,8 %** | **31,2 %** |
+| 4 (état/ouvert) | 52,3 % | 65,1 % | 67,4 % | 70,9 % | **77,3 %** |
+
+**Enseignements :**
+1. **Expansion et prompt sont cumulatifs.** Le cumul (±2 + prompt Run 1a) donne 70,7 %,
+   au-delà des deux leviers isolés. +20,4 pts sur la baseline.
+2. **Run 2a : l'expansion ±1 seule casse cat 2** (64,8 → 55,6 %) — les tours adjacents
+   noient la date précise. Le prompt Run 1a l'absorbe (2b : retour à 70,4 %).
+   → l'antagonisme est réel et la compensation fonctionne.
+3. **Run 2b : cat 3 régresse** (31,2 → 18,8 %) en cumulé ±1 — le Scan exhaustif pousse
+   à énumérer là où cat 3 demande d'inférer. **Réparé par ±2** (2c : 31,2 %).
+4. **Run 2c : progression encore forte (+6,9 pts) et partout.** Aucune catégorie ne
+   recule vs 2b. `misses_sample` : un cas passe de `INSUFFICIENT` à une agrégation
+   partielle (« A little girl around 8… » au lieu de `David, Jean, Cindy, Laura`)
+   → la preuve remonte, mais **le Reader agrège mal les listes** (ressort du Scan
+   exhaustif à durcir / Run 4).
+
+⚠️ **Réserve de méthode :** 2c (70,7 %) dépasse le plafond retrieval officiel de
+conv-41 (59,6 % hit@15). Neuf runs consécutifs sur **la même conv de 152 q** exposent
+à une sur-optimisation. **La validation passe par un run multi-conv**, pas par un
+10ᵉ run sur conv-41.
 ### Run 3 — Dual-Date Regex Anchoring à l'ingestion — À FAIRE
 ### Run 4 — Reranker local Cross-Encoder (top-50 → top-15), en fusion — À FAIRE
 ### Run Final — run officiel complet 10 convs (~45 min) — À FAIRE
