@@ -320,9 +320,39 @@ Catégories baseline : c1 38,7 % (31) · c2 64,8 % (27) · c3 25,0 % (8) · c4 5
   produire un fait absent des 15 extraits. C'est le mandat du Run 2.
 - Cat 4 (+12,8) : effet de bord bienvenu de la règle « Specificity Over Generality ».
 
-### Run 1b — règle d'inférence cat 3 — À FAIRE
+### Run 1b — règle d'inférence cat 3 — FAIT ✅
+Fichier : `results/ablation-conv41-Run1b-cat3-expand2.json` (prompt Run 1a + bloc
+« INFERENCE RULES (CATEGORY 3) », expand ±2).
 
-### Run 2 — Neighbor Turn Expansion (±1 puis ±2) — FAIT ✅
+| Run | acc | strict | partial | wrong |
+|---|---|---|---|---|
+| 2c (±2, sans cat 3) | 70,7 % | 61,8 % | 17,8 % | 20,4 % |
+| **1b (±2 + cat 3)** | **71,7 %** | **63,2 %** | 17,1 % | **19,7 %** |
+
+| cat | 2c | 1b | delta |
+|---|---|---|---|
+| 1 (multi-saut) | 56,5 % | 54,8 % | −1,7 |
+| 2 (temporel) | 77,8 % | **85,2 %** | +7,4 |
+| 3 (inférence) | 31,2 % | **37,5 %** | +6,3 |
+| 4 (état/ouvert) | 77,3 % | 76,7 % | −0,6 |
+
+**Enseignements :**
+- Cat 3 (cible) : **37,5 %** (25,0 baseline → 37,5). `misses_sample` ne garde que
+  2 échecs cat 3 (au lieu de 5), tous deux `INSUFFICIENT` sur des inférences
+  spéculatives (« financial status », « beach or mountains »).
+- Cat 2 bondit aussi (**85,2 %**, record) — la règle d'inférence renforce l'ancrage
+  temporel bien que non ciblée.
+- **Le bouclier ne recule pas :** cat 4 −0,6 (dans le bruit à n=86), cat 1 −1,7.
+  Aucun signe de dérive hallucinatoire. C'était le risque n°1, il est écarté.
+- Global **71,7 %**, +21,4 pts sur la baseline conv-41.
+
+⚠️ **Contrôle cat 5 non fait** : le run `--categories 1,2,3,4` ne couvre pas les
+questions adversariales. La spec exige de vérifier que le bouclier 88,7 % ne recule
+pas → à valider en run Hardcore (cat 1-5) avant de figer.
+
+### Run 3 — Dual-Date Regex Anchoring à l'ingestion — À FAIRE (optionnel)
+### Run 4 — Reranker local Cross-Encoder (top-50 → top-15), en fusion — À FAIRE
+### Run Final — run officiel complet 10 convs (~45 min) — À FAIRE
 Rappel : `expand_neighbours()` était **déjà branchée** dans `qa_score()` (l. 401),
 mais désactivée par défaut (`LOCOMO_EXPAND_WINDOW=0`). Run 2 = activation par env var,
 aucun code à modifier. Fenêtre pilotée par `LOCOMO_EXPAND_WINDOW`.
