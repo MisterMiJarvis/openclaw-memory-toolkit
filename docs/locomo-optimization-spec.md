@@ -397,3 +397,45 @@ conv-41 (59,6 % hit@15). Neuf runs consécutifs sur **la même conv de 152 q** e
 ### Run 3 — Dual-Date Regex Anchoring à l'ingestion — À FAIRE
 ### Run 4 — Reranker local Cross-Encoder (top-50 → top-15), en fusion — À FAIRE
 ### Run Final — run officiel complet 10 convs (~45 min) — À FAIRE
+
+### Run 1c — arbitrage anti-hallucination (A : durci) — FAIT ✅
+Fichier : `results/ablation-conv41-Run1b-hardcore-all.json` (avant) — contrôle cat 1-5.
+Ajout d'un bloc « ARBITRATION — WHEN TO INFER vs WHEN TO REFUSE » : distingue les
+questions *fait précis* (nom, nombre, date, lieu → refus si absent) des questions
+*inférence* (trait, statut, « might/could »).
+
+| Run | acc | strict | cat 3 | cat 5 |
+|---|---|---|---|---|
+| 1b (±2 + cat 3) | 73,6 % | 66,8 % | 37,5 % | 78,0 % |
+| **1c (A, durci)** | 73,1 % | 66,3 % | **50,0 %** | **85,4 %** |
+
+- Bouclier récupéré : 32/41 → 35/41 (+7,4), soit la moitié du recul visé.
+- Cat 3 monte à 50,0 % (+12,5) — l'arbitrage *aide* l'inférence au lieu de la brider.
+- **Coût** : cat 1 56,5→50,0, cat 2 85,2→77,8 → la règle « fait précis = refus »
+  attrape les questions « When… » et les listes, qui relèvent pourtant de l'inférence.
+
+### Run 1d — exceptions au refus (B : corrigé) — FAIT ✅ — RÉGLAGE RETENU
+Fichier : `results/ablation-conv41-Run1d-corrected-all.json` (cat 1-5, n=193).
+Ajout d'un bloc « EXCEPTIONS TO THE REFUSAL RULE » : les questions « When… » et les
+questions d'énumération (« What people/places/… », « How many times… ») ne sont
+**jamais** des questions « fait précis » et ne se refusent pas.
+
+| cat | baseline | 1b | 1c (A) | **1d (B)** |
+|---|---|---|---|---|
+| 1 (multi-saut) | 53,9 % | 56,5 % | 50,0 % | 53,2 % |
+| 2 (temporel) | 62,0 % | 85,2 % | 77,8 % | **85,2 %** |
+| 3 (inférence) | 26,0 % | 37,5 % | **50,0 %** | 43,8 % |
+| 4 (état/ouvert) | 61,2 % | 77,3 % | 76,2 % | **77,9 %** |
+| 5 (bouclier) | 92,7 %* | 78,0 % | **85,4 %** | 80,5 % |
+| **global** | **60,4 %** | 73,6 % | 73,1 % | **74,1 %** |
+
+\* cat 5 baseline conv-41 exacte = 38/41 (le 92,7 % du run Hardcore, non le 88,7 %
+global 10 convs).
+
+**Arbitrage assumé :** gain utile cat 1-4 = 60,5 → **75,3 %** (+14,8) ;
+recul bouclier cat 5 = 92,7 → 80,5 % (−12,2). Net +13,7 sur n=193.
+Le recul bouclier est **entièrement traçable à une cause unique** : le prompt ne
+connaît pas la catégorie de la question. → correction structurelle côté harnais
+(A2), pas côté prompt.
+
+### A2 — passer la catégorie au Reader (correction harnais) — FAIT ✅
