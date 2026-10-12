@@ -281,3 +281,47 @@ Mesurer chaque brique sur **une seule conversation témoin : `conv-41`**
 | `locomo-official-2026-10-11-qa-conv-49.json` | 4 680 o | conv-49 seul |
 
 Hash officiel : `a19c048220f9dd4d…` · Hash hardcore : `79d28339b2f2cc57`.
+
+---
+
+## 7. Journal d'ablation — conv-41 (n=152)
+
+Référence baseline conv-41 : **QA 50,3 %** (strict 40,1 %) · hit@15 59,6 %.
+Catégories baseline : c1 38,7 % (31) · c2 64,8 % (27) · c3 25,0 % (8) · c4 52,3 % (86).
+
+### Run 1a — Dual-Date (cat 2) + Scan exhaustif (cat 1) — FAIT ✅
+- Fichier : `results/locomo-official-2026-10-12-qa-conv-41.json`
+- Prompt : `READER_SYS` étendu (blocs « TEMPORAL & DATE RULES (DUAL-DATE FORMAT) » et
+  « MULTI-HOP & LIST AGGREGATION RULES (CATEGORY 1) »). **Sans** la règle d'inférence
+  cat 3, réservée au Run 1b.
+- Commande : `python3 locomo_official.py qa --conv conv-41 --k 15 --categories 1,2,3,4`
+- Durée : **383 s** (index 57,6 s + appels LLM). La fourchette « ~3 min » de la
+  spec était optimiste — prévoir **~6,5 min** par conv (n≈152).
+- Résultat : **accuracy 60,9 %** (strict 53,9 %, partial 13,8 %, wrong 32,2 %,
+  abstention 0,0 %).
+
+| cat | n | baseline | Run 1a | delta | correct/partial/wrong |
+|---|---|---|---|---|---|
+| 1 | 31 | 38,7 % | **48,4 %** | +9,7 | 9 / 12 / 10 |
+| 2 | 27 | 64,8 % | **70,4 %** | +5,6 | 19 / 0 / 8 |
+| 3 | 8 | 25,0 % | **31,2 %** | +6,2 | 2 / 1 / 5 |
+| 4 | 86 | 52,3 % | **65,1 %** | +12,8 | 52 / 8 / 26 |
+| **total** | **152** | **50,3 %** | **60,9 %** | **+10,6** | 82 / 21 / 49 |
+
+**Lecture :**
+- Gain strict (+13,8) **>** gain partiel : on a converti des partiels en corrects,
+  pas gonflé le score. Aucune catégorie ne régresse.
+- Cat 2 : **0 partiel** — la règle Dual-Date produit les deux formulations attendues
+  (relative + date résolue), exactement le mécanisme prévu.
+- Cat 1 : les 10 échecs restants du `misses_sample` sont **tous `INSUFFICIENT`**
+  sur des questions dont la preuve existe (ex. « What people has Maria met and
+  helped while volunteering? » → gold `David, Jean, Cindy, Laura`).
+  → **Le verrou est le Retriever, pas le Reader** : aucune règle de prompt ne peut
+  produire un fait absent des 15 extraits. C'est le mandat du Run 2.
+- Cat 4 (+12,8) : effet de bord bienvenu de la règle « Specificity Over Generality ».
+
+### Run 1b — règle d'inférence cat 3 — À FAIRE
+### Run 2 — Neighbor Turn Expansion (±1/±2) — À FAIRE
+### Run 3 — Dual-Date Regex Anchoring à l'ingestion — À FAIRE
+### Run 4 — Reranker local Cross-Encoder (top-50 → top-15), en fusion — À FAIRE
+### Run Final — run officiel complet 10 convs (~45 min) — À FAIRE
