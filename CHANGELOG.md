@@ -2,6 +2,18 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v4.0.6 — Read-only memory access for the agent (2026-10-13)
+
+### Added
+
+- **`mcp-server.py`** — stdio MCP server exposing `memory_query`, `memory_facts`
+  and `memory_stats` over the local hybrid search index. Read-only.
+- **`memory-audit.py`** — read-only memory state report (`--json`, `--db`),
+  SQLite opened with `mode=ro`.
+- **`memory-dedup.py`** — content-hash deduplication, dry-run by default,
+  marks duplicates with `superseded_by` + `status='superseded'` (never `DELETE`),
+  guarded by `--max-rows`.
+
 ## v4.0.5 — Dates are validated before they reach the graph (2026-10-11)
 
 ### Real fix
