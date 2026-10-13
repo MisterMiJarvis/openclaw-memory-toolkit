@@ -411,6 +411,41 @@ explain_resolution()  # -> {"model": ..., "source": "gateway:primary", "chain": 
 `hybrid-search/conflict_resolver.py`, `consolidate_advisor.py`. The model is
 resolved once per run (`@lru_cache`).
 
+### 11. `mcp-server.py` — Read-only memory access for any agent
+
+Exposes the local hybrid-search index over the Model Context Protocol (stdio),
+so any MCP-capable agent can query the memory **without shell access** and
+without writing to it. Three tools, all read-only:
+
+| Tool | Purpose |
+|------|---------|
+| `memory_query(query, top=5)` | Hybrid search (FTS5 BM25 + vector + RRF) over memory |
+| `memory_facts(topic=None, limit=20)` | Current facts, filterable by topic |
+| `memory_stats()` | Row counts, active facts, statuses, last insert |
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "python3",
+      "args": ["/path/to/memory-health/mcp-server.py"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+**Read-only by construction.** The server opens the index and never issues a
+write; the nightly pipeline keeps the monopoly on mutation. Diagnostics go to
+`stderr`, never to `stdout` — the JSON-RPC stream stays clean.
+
+```bash
+# smoke test without a gateway
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 mcp-server.py
+```
+
 ## Ontology
 
 JSONL-based entity and relation graph with YAML schema.
