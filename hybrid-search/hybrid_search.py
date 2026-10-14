@@ -27,6 +27,7 @@ import re
 import sqlite3
 import struct
 import sys
+import threading
 import time
 from datetime import datetime
 import urllib.request
@@ -312,7 +313,19 @@ def _escape_xml(text: str) -> str:
 class HybridMemoryStore:
     def __init__(self, db_path: str = DB_PATH, schema_path: str = SCHEMA_PATH):
         self.db_path = db_path
+        # T1 -- thread affinity. SQLite refuses by default to let a connection
+        # cross a thread boundary ('SQLite objects created in a thread can only
+        # be used in that same thread'). The LoCoMo v2 harness scores questions
+        # with a ThreadPoolExecutor(8), which used to hit that error on the very
+        # first query and silently produce an empty result set.
+        #
+        # `check_same_thread=False` would silence the error but is NOT the fix:
+        # it lets a shared connection AND its cursors race across threads, which
+        # can corrupt reads silently. Instead every thread gets its OWN read-only
+        # connection via _read_conn(). Writers keep self.conn, which is created
+        # here on the main thread and never used concurrently by the harness.
         self.conn = sqlite3.connect(db_path)
+        self._tls = threading.local()
         # C3/C1 — multi-process safety (read MCP/RRF vs async write hook):
         #   busy_timeout : wait up to 5s on a locked DB instead of crashing
         #   journal_mode : WAL lets readers and one writer coexist
@@ -324,6 +337,30 @@ class HybridMemoryStore:
         self.conn.load_extension(sqlite_vec.loadable_path())
         self.conn.enable_load_extension(False)
         self._init_schema(schema_path)
+
+    def _read_conn(self):
+        """Return a connection owned by the CALLING thread.
+
+        The main thread reuses self.conn (identical to the historical behaviour,
+        so single-threaded callers see no change). Any other thread lazily opens
+        its own connection with the same PRAGMAs and the sqlite-vec extension
+        loaded, then reuses it for the life of that thread.
+        """
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            return conn
+        if threading.current_thread() is threading.main_thread():
+            self._tls.conn = self.conn
+            return self.conn
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.enable_load_extension(True)
+        conn.load_extension(sqlite_vec.loadable_path())
+        conn.enable_load_extension(False)
+        self._tls.conn = conn
+        return conn
 
     def _init_schema(self, schema_path: str):
         with open(schema_path, 'r') as f:
@@ -418,7 +455,7 @@ class HybridMemoryStore:
             ORDER BY rank
             LIMIT ?
         """
-        rows = self.conn.execute(sql, (fts_query, *vparams, limit)).fetchall()
+        rows = self._read_conn().execute(sql, (fts_query, *vparams, limit)).fetchall()
         return [
             {"id": r[0], "content": r[1][:300], "source": r[2], "category": r[3],
              "layer": r[4], "bm25_score": r[5]}
@@ -438,7 +475,7 @@ class HybridMemoryStore:
             WHERE embedding MATCH ? AND k = ? AND {vis}
             ORDER BY distance
         """
-        rows = self.conn.execute(sql, (serialize_f32(query_emb), limit, *vparams)).fetchall()
+        rows = self._read_conn().execute(sql, (serialize_f32(query_emb), limit, *vparams)).fetchall()
         return [
             {"id": r[0], "content": r[1][:300], "source": r[2], "category": r[3],
              "layer": r[4], "vec_distance": r[5]}
@@ -501,7 +538,7 @@ class HybridMemoryStore:
         if temporal_boost and ranked_ids:
             ids_to_fetch = [mid for mid, _ in ranked_ids]
             placeholders = ','.join('?' * len(ids_to_fetch))
-            rows = self.conn.execute(
+            rows = self._read_conn().execute(
                 f"SELECT id, score FROM memories WHERE id IN ({placeholders})",
                 ids_to_fetch
             ).fetchall()
