@@ -34,6 +34,116 @@ Nightly Cron (23h)
 
 All scripts are standalone and composable. Run individually or as a pipeline.
 
+## Cogitator Architecture — Neuro-symbolic GraphRAG (v5.0)
+
+v5.0 marks a change of paradigm **and** of identity. The toolkit is now the
+**Cogitator**: a neuro-symbolic memory engine. Where v4.x perfected the
+vector/lexical retriever, v5.0 introduces the **semantic network** — a typed
+graph of entities and relations with an explicit confidence contract — and puts
+the LLM strictly *inside* a deterministic symbolic frame.
+
+The name is the architecture. **Neuro** is the extraction intuition (what to
+read, what to propose); **symbolic** is the SQLite schema that decides what is
+allowed to exist. The model proposes; the graph disposes.
+
+```
+        ┌─────────────────────────────────────────────────────────┐
+        │  NEURO — LLM proposes                          (opt-in)  │
+        │    trace_extractor.py   → candidate facts               │
+        │    ontology_linker.py    → candidate relations          │
+        │    conflict_resolver.py  → NLI classification            │
+        └───────────────────────────┬─────────────────────────────┘
+                                    │  proposals (never trusted as-is)
+                                    ▼
+        ┌─────────────────────────────────────────────────────────┐
+        │  SYMBOLIC — the graph decides                            │
+        │                                                          │
+        │  memory/ontology/graph.jsonl   (append-only ledger)      │
+        │    {"op":"relate","from":…,"rel":…,"to":…,               │
+        │     "properties":{"confidence":…, "evidence":…}}         │
+        │                                                          │
+        │  memory/ontology/schema.yaml   (type & relation contract)│
+        │  memories (SQLite)  ├─ FTS5/BM25 ──┐                     │
+        │                     └─ sqlite-vec ─┴─ RRF (k=15)         │
+        └─────────────────────────────────────────────────────────┘
+```
+
+### 1. The data contract — typed triples with confidence
+
+The ontology is no longer a bag of nodes. Every relation is a **qualifiable
+triple** `(from, rel, to)` carrying provenance in `properties`:
+
+```json
+{"op": "relate",
+ "from": "dec_2026-06-03_2593",
+ "rel": "about",
+ "to": "composio_not",
+ "properties": {"evidence": "auto-link: lexical overlap 0.8 (Decision -> Concept)",
+                "confidence": 0.8,
+                "source": "ontology_linker",
+                "valid_from": "2026-10-17"}}
+```
+
+- **`from` / `rel` / `to`** — subject, predicate, object. The relation vocabulary
+  is closed and declared in `schema.yaml` (`reports_to`, `has_owner`, `includes`,
+  `depends_on`, `manages`, `uses`, `integrated_with`, `located_at`, `fixes`,
+  `monitors`).
+- **`confidence`** — every edge is a *weighted* assertion, not a bare fact. A
+  lexical overlap and an LLM judgment are distinguished by `source`, so a later
+  pass can audit, reinforce or supersede an edge without guessing where it came
+  from.
+- **Append-only.** Edges are added, never rewritten or deleted; the graph is
+  fully replayable.
+
+### 2. The hallucination gate — refusing is a feature
+
+The single hardest rule of the Cogitator: **an entity attaches to the graph only
+when the match clears the confidence threshold.** Below it, the linker reports
+the orphan and *writes nothing*. A missing edge is honest; a fabricated one is
+not.
+
+On the first semantic-graph backfill this gate fired at scale:
+
+| Metric | Value | Meaning |
+| :--- | :--- | :--- |
+| Items processed | 620 | candidate entities examined |
+| Relations written | 388 | edges that cleared the threshold |
+| Refused (`null`) | 211 | no anchor above threshold — **34.0 %** |
+| Entities in graph | 1,098 | qualified nodes |
+| Orphan policy | assume-`null` | documented, valid state — never forced |
+
+> **34.0 %** is a **decision**, not a defect. It is the measured cost of
+> refusing to invent links. *Source: backfill execution logs (local run,
+> 211 refusals / 620 items); the graph itself stores only accepted edges.*
+
+The same strictness that makes the retriever reproducible is what keeps the
+graph trustworthy: **what is in the graph was justified, and what was not
+justified is visible as absent.**
+
+### 3. From Vector RAG to GraphRAG — and the honest boundary
+
+Vector RAG retrieves text that *looks like* the query. The Cogitator adds a
+symbolic layer — typed entities and weighted relations — so retrieval can reason
+over *structure*, not only similarity:
+
+1. **Retrieve** — BM25 ∪ vector, fused by RRF (`k=15`). Deterministic, zero LLM
+   calls.
+2. **Anchor** — matched facts resolve to graph entities via typed edges.
+3. **Synthesise** — the LLM reader answers *only* from grounded evidence, and
+   returns `INSUFFICIENT` rather than guessing (see the Category 3 / Category 5
+   trade-off below).
+
+**Scope note, stated plainly.** v5.0 deploys the semantic network (typed triples
+with confidence) and its strict admission gate. It does **not** yet claim
+multi-hop graph traversal as a retrieval strategy — that remains the
+`GraphRAG vs V4.2` work tracked in the roadmap. What ships today is the
+*substrate*: a trustworthy graph, and the discipline to keep it so. The
+benchmark below measures the deterministic retriever and the reader, exactly as
+before.
+
+> The Cogitator's rule in one line: **the LLM proposes, the schema decides, the
+> logs answer for what was refused.**
+
 ## Benchmark — LoCoMo (v4.0)
 
 Most AI memory benchmarks publish cherry-picked configurations: `top-200` context

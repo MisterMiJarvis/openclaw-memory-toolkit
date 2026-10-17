@@ -2,6 +2,95 @@
 
 All notable changes to the OpenClaw Memory Toolkit skill.
 
+## v5.0.0 — Cogitator: the neuro-symbolic turn (2026-10-17)
+
+### Why this release exists
+
+v4.x perfected the vector/lexical retriever: one ledger, a lifecycle, validated
+dates, no untracked orphans. v5.0 is the **paradigm break** — the toolkit gains
+a semantic network and a new identity. It is now the **Cogitator**: a
+neuro-symbolic memory engine in which the LLM's extraction intuition (*neuro*) is
+strictly framed by a deterministic schema (*symbolic*). The model proposes; the
+graph disposes.
+
+### Added
+
+- **Rebranding — the toolkit is now the Cogitator.** Product identity change,
+  starting with this release. "Neuro-symbolic" is the technical description of
+  what is deployed: LLM extraction (neuro) bounded by the deterministic SQLite
+  and ontology schema (symbolic).
+- **Data contract for the ontology — typed triples with confidence.** Relations
+  are now qualifiable `(from, rel, to)` triples carrying provenance in
+  `properties`:
+
+  ```json
+  {"op":"relate","from":"…","rel":"about","to":"…",
+   "properties":{"evidence":"…","confidence":0.8,
+                 "source":"ontology_linker","valid_from":"2026-10-17"}}
+  ```
+
+  A closed relation vocabulary (`reports_to`, `has_owner`, `includes`,
+  `depends_on`, `manages`, `uses`, `integrated_with`, `located_at`, `fixes`,
+  `monitors`) is declared in `schema.yaml`. Every edge is a **weighted**
+  assertion, not a bare fact; `source` distinguishes a lexical match from an LLM
+  judgment so a later pass can audit or supersede it. The graph stays
+  **append-only**.
+- **`README.md` → "Cogitator Architecture — Neuro-symbolic GraphRAG (v5.0)"** —
+  a dedicated section placed just before the benchmark, officialising the shift
+  from classic Vector RAG to GraphRAG over a strict semantic base.
+
+### The backfill — first semantic graph
+
+The first semantic-graph pass ran the admission gate at scale. The gate is the
+point: an entity joins the graph **only** if its match clears the confidence
+threshold.
+
+| Metric | Value |
+| :--- | :--- |
+| Items processed | 620 |
+| Relations written | 388 |
+| Refused (`null`) | 211 — **34.0 %** |
+| Entities in graph | 1,098 |
+| Orphan policy | assume-`null`, documented, never forced |
+
+> **34.0 % (211 refusals / 620 items)** is a deliberate quality bar, not a
+> failure. *Source: backfill execution logs (local run) — the graph stores only
+> accepted edges, so this figure is not derivable from `graph.jsonl` alone.*
+
+**Hallucination is refused by design.** Below threshold, the linker reports the
+orphan and writes nothing: a missing edge is honest, a fabricated one is not.
+What is in the graph was justified; what was not justified shows up as absent.
+
+### Documented invariants
+
+Held in v4.x; v5.0 promotes them to stated guarantees:
+
+- **The LLM is not in the query path.** A model outage degrades ingestion at
+  worst; it cannot change what a search returns.
+- **Retrieval is reproducible.** FTS5/BM25 ∪ vector, fused by RRF — closed-form.
+  Same index, same query, same rows, same order.
+- **The ledger is append-then-supersede.** Facts marked `superseded`
+  (`superseded_at` + `superseded_by`, `ON DELETE SET NULL`), never `DELETE`d.
+- **State is owned by the database.** `CHECK` on `status`/`confidence`, the
+  `superseded_by` foreign key, and mirrored `AFTER UPDATE` triggers.
+
+### Scope note — honest boundary
+
+v5.0 deploys the semantic substrate (typed triples + strict admission) and the
+rebranding. It does **not** yet claim multi-hop graph traversal as a retrieval
+strategy — that is the `GraphRAG vs V4.2` roadmap item. The benchmark section is
+unchanged and still measures the deterministic retriever and the reader.
+
+### Verified
+
+- Graph figures (388 edges, 1,098 entities) counted directly on
+  `memory/ontology/graph.jsonl` — not from memory.
+- The 34.0 % is quoted from the backfill execution logs, labelled as such; it is
+  not asserted to be reconstructible from the graph file.
+- The graph is unchanged since the 13:45 backfill (md5 equal to the pre-run
+  backup `e20370314a32337c9a423ece21f80c66`) — no partial writes from the
+  aborted follow-up attempt.
+
 ## v4.0.6 — Read-only memory access for the agent (2026-10-13)
 
 ### Added
