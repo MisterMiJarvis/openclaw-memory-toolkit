@@ -35,6 +35,15 @@ import urllib.error
 import glob
 from urllib.parse import urlparse
 
+# v5.0 Cogitator — graph retrieval (anchor/traverse/synthesise).
+# Optional on purpose: the hybrid index must keep working even if the ontology
+# graph is absent. Imported lazily inside render_context so a missing/broken
+# graph_search never breaks plain retrieval.
+try:
+    from graph_search import GraphStore as _GraphStore
+except Exception:  # pragma: no cover - defensive
+    _GraphStore = None
+
 # sqlite-vec must be installed in the active interpreter/environment:
 #     pip install sqlite-vec
 # Never add a world-writable directory (e.g. /tmp) to sys.path: anything able to
@@ -358,8 +367,13 @@ def apply_token_budget(results: list[dict], max_tokens: int) -> list[dict]:
 
 def render_context(results: list[dict], budget: int = 800,
                    core_facts: list[str] | None = None,
-                   session_context: str | None = None) -> str:
-    """Render a strict <agent_memory> injection block.
+                   session_context: str | None = None,
+                   query: str | None = None,
+                   graph_depth: int = 1,
+                   graph_threshold: float = 0.34,
+                   graph_limit: int = 8,
+                   graph_store=None) -> str:
+    """Render a strict <agent_memory> injection block (v5.0, unified).
 
     Purpose (Gemini vigilance #2): keep background memory unambiguously
     separated from the live user prompt, so the agent cannot mistake a recalled
@@ -367,11 +381,24 @@ def render_context(results: list[dict], budget: int = 800,
     text cannot be executed as one (indirect injection). The retrieved block is
     explicitly labelled as NON-AUTHORITATIVE DATA.
 
+    v5.0 — ONE trust boundary (Option 2, unified block). The reader sees a single
+    <agent_memory trusted="false"> envelope, with a single anti-injection
+    comment, and exactly TWO drawers inside:
+        <retrieved_memories>  — the RAG hits (vector/lexical, hybrid search)
+        <cogitator_context>   — the deterministic ontology sub-graph
+    Two envelopes would have diluted the trust instruction and risked
+    contradicting each other; one boundary, one comment, two drawers.
+
     Tags:
-      <agent_memory>   ... </agent_memory>          — retrieved facts (data)
-        <core_facts>   ... </core_facts>            — identity/preferences, trusted
-        <retrieved_context> ... </retrieved_context>— hybrid search hits
-        <session_context> ... </session_context>    — ephemeral, may be stale
+      <agent_memory>        ... </agent_memory>    — non-authoritative data
+        <core_facts>        ... </core_facts>      — identity/preferences, trusted
+        <retrieved_memories>... </retrieved_memories> — hybrid search hits
+        <cogitator_context> ... </cogitator_context>  — ontology sub-graph (v5.0)
+        <session_context>   ... </session_context> — ephemeral, may be stale
+
+    The graph drawer is only produced when `query` is given and graph_search is
+    importable. If the graph is absent or the query yields no anchor, the drawer
+    is simply omitted and the block degrades to plain hybrid retrieval.
     """
     parts: list[str] = ['<agent_memory source="memory-toolkit" trusted="false">']
     parts.append(
@@ -391,7 +418,7 @@ def render_context(results: list[dict], budget: int = 800,
         parts.append("  </session_context>")
 
     kept = apply_token_budget(results, budget)
-    parts.append(f"  <retrieved_context count=\"{len(kept)}\" budget=\"{budget}\">")
+    parts.append(f"  <retrieved_memories count=\"{len(kept)}\" budget=\"{budget}\">")
     for r in kept:
         parts.append(
             f"    <memory source=\"{_escape_xml(r.get('source',''))}\" "
@@ -400,9 +427,47 @@ def render_context(results: list[dict], budget: int = 800,
         )
         parts.append(f"      {_escape_xml(r.get('content',''))}")
         parts.append("    </memory>")
-    parts.append("  </retrieved_context>")
+    parts.append("  </retrieved_memories>")
+
+    # v5.0 — Cogitator graph drawer (deterministic anchors -> traverse -> synthesise)
+    parts.extend(_render_cogitator_drawer(
+        query, depth=graph_depth, threshold=graph_threshold,
+        limit=graph_limit, store=graph_store,
+    ))
+
     parts.append("</agent_memory>")
     return "\n".join(parts)
+
+
+def _render_cogitator_drawer(query: str | None, depth: int = 1,
+                             threshold: float = 0.34, limit: int = 8,
+                             store=None) -> list[str]:
+    """Build the <cogitator_context> drawer, or [] when there is nothing to add.
+
+    Kept separate from render_context so the graph can be omitted entirely
+    (no query / module absent / no anchor) without leaving an empty tag behind.
+    Anchor resolution is 100% deterministic — no model is consulted here.
+    """
+    if not query or _GraphStore is None:
+        return []
+    try:
+        store = store or _GraphStore()
+        anchors = store.resolve_anchors(query, threshold=threshold, limit=limit)
+        if not anchors:
+            return []
+        sub = store.traverse(anchors, depth=depth)
+        inner = store.synthesise(sub, query=query)
+    except Exception:
+        # A graph failure must never take retrieval down with it.
+        return []
+    # synthesise() already wraps its own <agent_memory> envelope; we only want
+    # the inner <cogitator_context> here, since the outer envelope is shared.
+    lines = inner.splitlines()
+    start = next((i for i, ln in enumerate(lines) if "<cogitator_context" in ln), None)
+    end = next((i for i, ln in enumerate(lines) if "</cogitator_context>" in ln), None)
+    if start is None or end is None:
+        return []
+    return ["  " + ln for ln in lines[start:end + 1]]
 
 
 def _escape_xml(text: str) -> str:
@@ -1278,7 +1343,10 @@ def cmd_context(args):
                                   max_tokens=args.budget,
                                   as_of=getattr(args, "as_of", None))
     core = [f.strip() for f in (args.core_fact or [])]
-    block = render_context(results, budget=args.budget, core_facts=core or None)
+    block = render_context(results, budget=args.budget, core_facts=core or None,
+                          query=args.text,
+                          graph_depth=getattr(args, "graph_depth", 1),
+                          graph_threshold=getattr(args, "graph_threshold", 0.34))
     print(block)
     store.close()
 
@@ -1392,6 +1460,10 @@ def main():
     ctx_parser.add_argument("--min-score", type=float, default=None, help="Min RRF score (default: 0.015)")
     ctx_parser.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
                             help="Point-in-time retrieval: reconstruct facts visible on that date (v3.4)")
+    ctx_parser.add_argument("--graph-depth", type=int, default=1,
+                            help="Cogitator graph traversal depth (0 = disable graph drawer, default: 1)")
+    ctx_parser.add_argument("--graph-threshold", type=float, default=0.34,
+                            help="Cogitator anchor lexical threshold (default: 0.34)")
 
     # stats
     subparsers.add_parser("stats", help="Show DB stats")
