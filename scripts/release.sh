@@ -32,6 +32,7 @@ SYNC_FILES=(
   hybrid-search/test_loopback_guard.py hybrid-search/test_model_resolution.py
   hybrid-search/test_meta_gate.py hybrid-search/test_extract_atomic.py
   hybrid-search/test_ontology_key_parity.py hybrid-search/test_orphan_link.py
+  hybrid-search/graph_search.py hybrid-search/test_graph_search.py
   docs/SECURITY-AUDIT-NOTES.md
   hybrid-search/auto_capture.py hybrid-search/transcript_adapter.py
 )
