@@ -120,17 +120,115 @@ def serialize_f32(vec: list[float]) -> bytes:
     """Serialize a float list into little-endian bytes for sqlite-vec."""
     return struct.pack(f"{len(vec)}f", *vec)
 
+# FIX A -- mordant lexical du FTS5 (15/10).
+#
+# Diagnostic (Sonde 2) : clean_fts_query("When did Maria meet Jean?") produisait
+#   "When" "did" "Maria" "meet" "Jean"
+# soit 5 tokens joints par le AND implicite de FTS5. Trois d'entre eux
+# (when/did/meet-sans... non : when/did sont des stopwords) ne matchent AUCUN
+# tour : le tour D7:5 qui contient pourtant la reponse est rejete en silence,
+# le lexical rend 0 hit, et le vecteur -- ancre sur la forme emotionnelle
+# ("Wow", "That's nice of you, John") -- impose son bruit a la fusion RRF.
+# Resultat mesure : D7:5 au rang 37 en vectoriel, ABSENT du top-6 hybride.
+#
+# Correctif : retirer les stopwords (interrogatifs, auxiliaires, pronoms,
+# prepositions) AVANT de construire la requete, et passer en OR explicite
+# pour que les substantifs/entites survivants ("Maria", "meet", "Jean")
+# suffisent a faire remonter le document. On GARDE les verbes de contenu
+# ("meet" n'est PAS un stopword) : c'est precisement le signal recherche.
+#
+# Garde-fous :
+#  - si le filtre ne laisse RIEN (requete entierement en stopwords), on
+#    retombe sur la requete d'origine -- jamais de '("")' qui rendrait 0 hit.
+#  - un seul terme restant : pas de OR, un simple match d'entite.
+#  - jamais de stemming agressif : on ne casse pas pire que ce qu'on repare.
+FTS_STOPWORDS = frozenset({
+    # interrogatifs / relatifs
+    'when', 'where', 'why', 'how', 'who', 'whom', 'whose', 'which', 'what',
+    'that', 'this', 'these', 'those',
+    # auxiliaires / modaux
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+    'do', 'does', 'did', 'done', 'doing',
+    'has', 'have', 'had', 'having',
+    'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+    # pronoms
+    'i', 'me', 'my', 'mine', 'myself',
+    'you', 'your', 'yours', 'yourself', 'yourselves',
+    'he', 'him', 'his', 'himself', 'she', 'her', 'hers', 'herself',
+    'it', 'its', 'itself', 'we', 'us', 'our', 'ours', 'ourselves',
+    'they', 'them', 'their', 'theirs', 'themselves',
+    # articles / determinants / conjonctions / prepositions
+    'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'than', 'so',
+    'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'about', 'into',
+    'from', 'up', 'down', 'out', 'over', 'under', 'again', 'once', 'here',
+    'there', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other',
+    'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'too',
+    'very', 'just', 'now', 'as', 'until', 'while', 'during', 'before',
+    'after', 'between', 'against', 'because', 'been',
+    # contractions courantes
+    "n't", "'s", "'re", "'ve", "'ll", "'d", "'m",
+    # stopwords francais frequents (requetes mixtes possibles)
+    'le', 'la', 'les', 'un', 'une', 'des', 'du', 'de', 'et', 'ou', 'mais',
+    'que', 'qui', 'quoi', 'dont', 'est', 'sont', 'etait', 'ete', 'avoir',
+    'il', 'elle', 'ils', 'elles', 'je', 'tu', 'nous', 'vous', 'se', 'sa',
+    'son', 'ses', 'ce', 'cet', 'cette', 'ces', 'pour', 'par', 'sur', 'dans',
+    'avec', 'sans', 'chez', 'plus', 'moins', 'tres', 'pas', 'ne', 'au', 'aux',
+})
+
+
 def clean_fts_query(query: str) -> str:
-    """Clean a query string for FTS5 MATCH syntax."""
+    """Clean a query string for FTS5 MATCH syntax.
+
+    FIX A (15/10) : retire les stopwords avant de construire la requete et
+    joint les termes restants par OR explicite. Sans cela, un AND implicite
+    sur "When" "did" "Maria" "meet" "Jean" rend 0 hit (3 tokens sur 5 ne
+    matchent rien) et sabote le lexical au profit du bruit vectoriel.
+
+    >>> clean_fts_query("When did Maria meet Jean?")
+    '"Maria" OR "meet" OR "Jean"'
+    >>> clean_fts_query("the")
+    '"the"'
+    """
     cleaned = re.sub(r'["\*\(\)\+\-\:\[\]\{\}\^~/=!@#]', ' ', query)
     cleaned = re.sub(r'\bNEAR\b', ' ', cleaned, flags=re.IGNORECASE)
+    # FIX A2 (15/10) : le filtre ci-dessus ne jette que les caracteres FTS
+    # speciaux, PAS la ponctuation de phrase. Or l'index (tokenizer unicode61)
+    # ne stocke que le token nu ('jean'), donc une requete '"Jean?"' rendrait
+    # 0 hit. On normalise toute ponctuation residuelle en separateur.
+    cleaned = re.sub(r"[^\w\s'-]", ' ', cleaned)
     terms = cleaned.split()
     if not terms:
         return '""'
-    return ' '.join(f'"{t}"' for t in terms)
+    # FIX A : filtre les stopwords, jamais jusqu'a vider la requete.
+    content = [t for t in terms if t.lower() not in FTS_STOPWORDS]
+    kept = content if content else terms
+    if len(kept) == 1:
+        return f'"{kept[0]}"'
+    return ' OR '.join(f'"{t}"' for t in kept)
+
+# T2 -- embedding robustness (14/10). Le run LoCoMo expand=2 a logue
+#   [ERROR] Embedding failed: timed out
+# puis a indexe 663 tours QUAND MEME. Deux defauts :
+#   1. timeout=30s fixe. Sur un pod, le PREMIER appel charge nomic-embed-text
+#      a froid (RAM vide, disque reseau) : mesurer 0,6s a chaud ne dit rien du
+#      demarrage. 30s est juste a la limite, et une seule requete perdue laisse
+#      un trou invisible dans l'index.
+#   2. backoff de 1s entre tentatives : insuffisant si Ollama est encore en
+#      train de charger le modele, on re-tape dans le mur 1s plus tard.
+# On passe a un timeout par tentative qui CROIT (30/60/120s) avec un backoff
+# proportionnel, et surtout on n'avale plus l'erreur en silence : le dernier
+# echec leve une RuntimeError explicite (voir aussi add_memory, qui doit
+# faire echouer l'indexation plutot que committer un index partiel).
+EMBED_TIMEOUTS = (30, 60, 120)
+
 
 def get_embedding(text: str, retries: int = 3) -> list[float]:
-    """Get embedding from Ollama API with retry on 429.
+    """Get embedding from Ollama API with retry on 429 and cold-start timeouts.
+
+    T2: timeouts croissants (30s -> 60s -> 120s). Le premier appel apres le
+    demarrage d'un pod paie le chargement du modele en RAM ; les suivants sont
+    chauds (~0,6s mesures). Un retry court ne rattrape PAS un modele qui charge.
+    L'echec final est bruyant : RuntimeError, jamais un vecteur nul silencieux.
 
     ⚠️ Privacy note: Text content is sent to the local Ollama instance (OLLAMA_EMBED_URL)
     for vectorization. Ensure OLLAMA_EMBED_URL stays on localhost for privacy.
@@ -142,6 +240,7 @@ def get_embedding(text: str, retries: int = 3) -> list[float]:
         _embedding_warning_shown = True
     payload = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode()
     for attempt in range(retries):
+        timeout = EMBED_TIMEOUTS[min(attempt, len(EMBED_TIMEOUTS) - 1)]
         try:
             req = urllib.request.Request(
                 OLLAMA_EMBED_URL,
@@ -150,19 +249,22 @@ def get_embedding(text: str, retries: int = 3) -> list[float]:
                 method="POST",
             )
             # SECURITY: urlopen sends to OLLAMA_EMBED_URL (default localhost:11434) — keep local for privacy
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
                 return data["embedding"]
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                print(f"  [429] Rate limited, waiting 5s... (attempt {attempt+1}/{retries})", flush=True)
-                time.sleep(5)
+            # Un 5xx Ollama (modele en cours de chargement) se retente comme un
+            # timeout ; un 4xx (mauvais modele, requete invalide) est fatal.
+            if e.code == 429 or 500 <= e.code < 600:
+                print(f"  [{e.code}] Ollama, attente avant retry (attempt {attempt+1}/{retries})", flush=True)
+                time.sleep(min(5 * (attempt + 1), 15))
             else:
                 raise
         except Exception as e:
-            print(f"  [ERROR] Embedding failed: {e}", flush=True)
+            print(f"  [ERROR] Embedding failed (timeout={timeout}s): {e}", flush=True)
             if attempt < retries - 1:
-                time.sleep(1)
+                # Backoff proportionnel au timeout : laisser Ollama finir de charger.
+                time.sleep(2 ** attempt)
             else:
                 raise
     raise RuntimeError("Embedding failed after all retries")
