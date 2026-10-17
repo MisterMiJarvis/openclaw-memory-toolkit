@@ -2,10 +2,31 @@
 """Ontology graph compactor (GC for the OP-log).
 
 Reads memory/ontology/graph.jsonl (an append-only operation log), replays it
-into a consolidated state, and writes one line per active entity.
+into a consolidated state, and writes one line per active entity plus one
+line per surviving relation.
 
-Safety: backs up first, writes to a temp file, validates entity-by-entity,
-and only swaps in place if the state is provably identical.
+Edge compaction (Phase 3, 2026-10-17)
+------------------------------------
+Relations used to be re-emitted verbatim: the same fact stated twice in the
+log stayed twice in the graph. After a few ingestion passes the graph carried
+hundreds of byte-identical `relate` lines, which inflated the edge count the
+visualiser reports and made multi-edges indistinguishable from real
+multiplicity.
+
+`dedupe_relations()` now collapses relations on the *semantic* triple
+(source, relation, target). It deliberately does NOT hash the raw JSON line:
+two ops can describe the same edge with different key spellings
+(`from`/`source`/`subject`) or with reordered keys, so a byte comparison would
+miss the duplicate. The first occurrence wins and its line is re-emitted
+as-is; later copies are dropped and counted.
+
+What is NOT collapsed: two edges with the same endpoints but a different
+relation (`reports_to` vs `manages`) are genuinely distinct facts and both
+survive.
+
+Safety: backs up first, writes to a temp file, validates entity-by-entity
+and relation-by-relation, and only swaps in place if the state is provably
+identical (modulo the duplicates we meant to drop).
 
 Usage:
     python3 scripts/ontology-compact.py --dry-run   # report only
@@ -144,6 +165,54 @@ def sync_db_superseded(dropped_ids) -> int | None:
         return None
 
 
+def relation_key(rel: dict):
+    """Semantic identity of a relation: (source, relation, target).
+
+    Not the raw line. The op-log tolerates key variants (`from`/`source`/
+    `subject`, `to`/`target`/`object`) and JSON key order is not stable, so
+    two lines that mean the same thing look different as bytes. Identity is
+    the triple, nothing else.
+    """
+    src, dst = _rel_endpoints(rel)
+    kind = rel.get("rel") or rel.get("kind") or rel.get("relation")
+    if not src or not dst or not kind:
+        return None
+    return (src, kind, dst)
+
+
+def dedupe_relations(relations):
+    """Collapse duplicate edges, keeping the FIRST occurrence of each triple.
+
+    Returns (kept, duplicates) where `kept` preserves the original log order
+    (stable output for Git diffs) and `duplicates` lists the dropped triples
+    so the operator can see exactly what was folded away.
+
+    Rationale for first-wins rather than last-wins: relation ops are
+    append-only observations, not state. A later identical edge carries no
+    new information, and keeping the earliest keeps the output stable across
+    repeated compaction runs (compaction must be idempotent).
+    """
+    kept, duplicates = [], []
+    seen = set()
+    for rel in relations:
+        key = relation_key(rel)
+        if key is None:
+            # No usable predicate: keep the line verbatim, EVERY time, and never
+            # let it occupy a slot in `seen`. Two reasons:
+            #   1. it is a data bug to surface, not to garbage-collect;
+            #   2. folding two of these under a single ('x','?','y') key would
+            #      be a LOSSY merge — the placeholder '?' is our ignorance of
+            #      the predicate, so it means "unknown", not "the same".
+            kept.append(rel)
+            continue
+        if key in seen:
+            duplicates.append(key)
+            continue
+        seen.add(key)
+        kept.append(rel)
+    return kept, duplicates
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -170,6 +239,11 @@ def main():
         else:
             orphan_rel.append((src, dst))
 
+    # M5 (Phase 3, 2026-10-17) — collapse duplicate edges before writing.
+    # Orphans are dropped first (they can never be valid), then what remains is
+    # deduplicated on the semantic triple (source, relation, target).
+    kept_rel, dup_rel = dedupe_relations(kept_rel)
+
     lines_out = []
     for eid in active:
         lines_out.append(json.dumps({"op": "state", "entity": entities[eid]},
@@ -185,10 +259,16 @@ def main():
     print(f"  lines     : {total} -> {len(active)}  ({total - len(active)} dropped)")
     print(f"  size      : {size_before:,} -> {size_after:,} o  (-{gain:.0f}%)")
     print(f"  entities  : {len(active)} active, {len(superseded)} superseded")
-    print(f"  relations : {len(kept_rel)} kept, {len(orphan_rel)} orphan(s) dropped")
+    print(f"  relations : {len(kept_rel)} kept, {len(orphan_rel)} orphan(s) dropped, "
+          f"{len(dup_rel)} duplicate(s) merged")
     if orphan_rel:
         for src, dst in orphan_rel[:5]:
             print(f"    ⤫ orphan: {src} -> {dst}")
+    if dup_rel:
+        for src, kind, dst in dup_rel[:5]:
+            print(f"    ⧉ dup: {src} -[{kind}]-> {dst}")
+        if len(dup_rel) > 5:
+            print(f"    … and {len(dup_rel) - 5} more")
     if bad:
         print(f"  WARNING   : {bad} unparsable line(s)")
 
