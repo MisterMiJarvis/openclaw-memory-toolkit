@@ -42,12 +42,18 @@ SHARED = "llm_resolution"
 
 
 def _run(module, env, code=None):
-    """Import `module` in a clean subprocess and print its resolved model."""
+    """Import `module` in a clean subprocess and print its resolved model.
+
+    The subprocess path must include BOTH the harness directory (hybrid-search/,
+    where the test-suite modules live) and the repo root (where consolidate_advisor
+    lives). Before this fix only HERE was on the path, so importing
+    consolidate_advisor failed with ModuleNotFoundError.
+    """
     code = code or (
-        "import sys; sys.path.insert(0, %r);"
+        "import sys; sys.path.insert(0, %r); sys.path.insert(0, %r);"
         "import %s as m;"
         "print(getattr(m, 'LLM_MODEL', None) or getattr(m, 'OLLAMA_MODEL', ''))"
-        % (HERE, module)
+        % (HERE, REPO, module)
     )
     return subprocess.run(
         [sys.executable, "-c", code],
