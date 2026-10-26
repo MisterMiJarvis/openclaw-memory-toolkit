@@ -115,6 +115,49 @@ ALLOWED_SCAN_FILES = (
 # One-time embedding warning flag
 _embedding_warning_shown = False
 
+# Disjoncteur (22/10/2026). Un endpoint d'embedding durablement absent ne doit
+# pas faire tourner le pipeline pendant des heures : chaque appel epuise ses
+# 3 tentatives (30+60+120s) puis leve, et build_index appelle get_embedding une
+# fois PAR MEMOIRE. Mesure du 22/10 : 45 min de silence a RSS constant et 0 %
+# CPU sur 15 pods, avec [Errno 111] Connection refused en boucle. Apres
+# EMBED_BREAKER_THRESHOLD echecs CONSECUTIFS, on considere l'endpoint mort et
+# on coupe tout : EmbeddingEndpointDown, non rattrapable (sous-classe de
+# RuntimeError pour les appelants existants, de BaseException par l'esprit).
+EMBED_BREAKER_THRESHOLD = int(os.environ.get("EMBED_BREAKER_THRESHOLD", "3"))
+_consecutive_embed_failures = 0
+_embed_breaker_lock = threading.Lock()
+
+
+class EmbeddingEndpointDown(RuntimeError):
+    """L'endpoint d'embedding est mort : on ne retente plus rien.
+
+    Herite de RuntimeError pour rester compatible avec les appelants qui
+    attrapaient deja RuntimeError, mais le message indique clairement qu'il
+    s'agit d'un arret du pipeline, pas d'un echec ponctuel.
+    """
+
+
+def _record_embed_failure(err: Exception) -> None:
+    """Incremente le compteur d'echecs consecutifs et ouvre le disjoncteur."""
+    global _consecutive_embed_failures
+    with _embed_breaker_lock:
+        _consecutive_embed_failures += 1
+        n = _consecutive_embed_failures
+        if n >= EMBED_BREAKER_THRESHOLD:
+            raise EmbeddingEndpointDown(
+                "DISJONCTEUR : %d echecs consecutifs d'embedding sur %s "
+                "(derniere erreur : %r). L'endpoint est considere mort, "
+                "indexation interrompue pour ne pas produire un index partiel."
+                % (n, OLLAMA_EMBED_URL, err)
+            ) from err
+
+
+def _record_embed_success() -> None:
+    """Un succes remet le compteur a zero (echecs isoles = pas un disjoncteur)."""
+    global _consecutive_embed_failures
+    with _embed_breaker_lock:
+        _consecutive_embed_failures = 0
+
 
 def check_ollama_url():
     """Warn if OLLAMA_URL or OLLAMA_EMBED_URL is not localhost."""
@@ -185,6 +228,99 @@ FTS_STOPWORDS = frozenset({
 })
 
 
+# PATCH B (23/10/2026) -- filtrage par frequence documentaire (df).
+#
+# Mesure sur conv-26 (419 docs, 23/10) : une question factuelle type
+#   "When did Melanie paint a sunrise?"
+# donne les termes melanie=265 docs (63,25%), paint=3 (0,72%), sunrise=1 (0,24%).
+# Le OR brut les met a EGALITE de poids : le prénom de la locutrice, présent
+# dans 63% du corpus, écrase le terme porteur de l'information. C'est le
+# lexical gap tel qu'il se manifeste mecaniquement.
+#
+# GARDE-FOU : on n'ecarte des termes frequents QUE si au moins un terme de
+# secours existe reellement dans l'index (df >= 1). Sur une question dont
+# aucun terme n'existe ("relationship status" -> 0 doc chacun), on ne filtre
+# RIEN : le comportement actuel est preserve et on ne peut pas degrader.
+DF_FILTER = os.environ.get("LOCOMO_DF_FILTER", "1") != "0"
+DF_MAX_RATIO = float(os.environ.get("LOCOMO_DF_MAX_RATIO", "0.10"))
+_DF_CACHE: dict[str, int] = {}
+_DF_CONN = None
+_DF_LOCK = threading.Lock()
+
+
+def _df_conn(db_hint: str | None = None):
+    """Connexion lecture seule pour compter les df. Ouverte une seule fois.
+
+    Le chemin vient de LOCOMO_DF_DB (pose par le harnais) : ce module est
+    multi-base (workspace, LoCoMo, tests), donc on ne code aucun chemin en dur.
+    Sans la variable, le filtre est inactif : echec ouvert, jamais silencieux.
+    """
+    global _DF_CONN
+    with _DF_LOCK:
+        if _DF_CONN is not None:
+            return _DF_CONN
+        path = db_hint or os.environ.get("LOCOMO_DF_DB") or ""
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            _DF_CONN = sqlite3.connect(f"file:{path}?mode=ro", uri=True,
+                                       check_same_thread=False)
+        except Exception:
+            _DF_CONN = None
+        return _DF_CONN
+
+
+def _doc_count(conn) -> int:
+    key = "__N__"
+    if key in _DF_CACHE:
+        return _DF_CACHE[key]
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    except Exception:
+        n = 0
+    _DF_CACHE[key] = n
+    return n
+
+
+def _term_df(conn, term: str) -> int:
+    t = term.lower().strip().strip('"')
+    if not t:
+        return 0
+    if t in _DF_CACHE:
+        return _DF_CACHE[t]
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?",
+            (f'"{t}"',)).fetchone()[0]
+    except Exception:
+        n = 0
+    _DF_CACHE[t] = n
+    return n
+
+
+def _filter_common_terms(terms: list[str]) -> list[str]:
+    """Ecarte les termes dont la df depasse DF_MAX_RATIO, si un secours existe.
+
+    Retourne `terms` inchange des que le garde-fou refuse de filtrer, ce qui
+    rend la fonction sure a appeler sur n'importe quelle requete.
+    """
+    if not DF_FILTER or len(terms) <= 1:
+        return terms
+    conn = _df_conn()
+    if conn is None:
+        return terms
+    total = _doc_count(conn)
+    if total <= 0:
+        return terms
+    dfs = [(t, _term_df(conn, t)) for t in terms]
+    # Garde-fou : sans terme de secours reellement present, on ne touche a rien.
+    rare = [t for t, n in dfs if 0 < n <= total * DF_MAX_RATIO]
+    if not rare:
+        return terms
+    kept = [t for t, n in dfs if 0 < n <= total * DF_MAX_RATIO]
+    return kept if kept else terms
+
+
 def clean_fts_query(query: str) -> str:
     """Clean a query string for FTS5 MATCH syntax.
 
@@ -205,12 +341,23 @@ def clean_fts_query(query: str) -> str:
     # ne stocke que le token nu ('jean'), donc une requete '"Jean?"' rendrait
     # 0 hit. On normalise toute ponctuation residuelle en separateur.
     cleaned = re.sub(r"[^\w\s'-]", ' ', cleaned)
+    # PATCH A (23/10/2026) -- desalignement tokenizer unicode61.
+    # On gardait l'apostrophe (classe [^\w\s'-] l'exclut du nettoyage) alors
+    # que FTS5 decoupe "Caroline's" en ('caroline', 's'). La requete litterale
+    # "Caroline's" ne matchait donc RIEN : MATCH "Caroline's" -> 0 doc,
+    # MATCH "Caroline" -> 339 docs sur 419. On ramene le possessif a sa racine.
+    # Mesure avant/apres sur conv-26 : cf. LOCOMO_APOSTROPHE_FIX.
+    if os.environ.get("LOCOMO_APOSTROPHE_FIX", "1") != "0":
+        cleaned = re.sub(r"'s\b", '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"s'\b", 's', cleaned)
+        cleaned = cleaned.replace("'", ' ')
     terms = cleaned.split()
     if not terms:
         return '""'
     # FIX A : filtre les stopwords, jamais jusqu'a vider la requete.
     content = [t for t in terms if t.lower() not in FTS_STOPWORDS]
     kept = content if content else terms
+    kept = _filter_common_terms(kept)
     if len(kept) == 1:
         return f'"{kept[0]}"'
     return ' OR '.join(f'"{t}"' for t in kept)
@@ -260,6 +407,7 @@ def get_embedding(text: str, retries: int = 3) -> list[float]:
             # SECURITY: urlopen sends to OLLAMA_EMBED_URL (default localhost:11434) — keep local for privacy
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
+                _record_embed_success()
                 return data["embedding"]
         except urllib.error.HTTPError as e:
             # Un 5xx Ollama (modele en cours de chargement) se retente comme un
@@ -275,6 +423,10 @@ def get_embedding(text: str, retries: int = 3) -> list[float]:
                 # Backoff proportionnel au timeout : laisser Ollama finir de charger.
                 time.sleep(2 ** attempt)
             else:
+                # Ce get_embedding a epuise ses tentatives : c'est un echec
+                # d'APPEL. Le disjoncteur compte les echecs d'appel successifs
+                # et coupe le pipeline au seuil.
+                _record_embed_failure(e)
                 raise
     raise RuntimeError("Embedding failed after all retries")
 
