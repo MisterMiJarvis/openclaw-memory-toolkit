@@ -12,7 +12,23 @@
 #
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# FIX 2026-10-26 -- ce gate comparait la skill avec elle-meme.
+# L'ancien calcul (dirname $BASH_SOURCE /..) donnait .../skills/memory-health,
+# c-a-d SKILL_DIR : les 23 fichiers ressortaient "OK" quoi qu'il arrive et le
+# garde-fou ne pouvait structurellement jamais detecter une divergence.
+# Desormais REPO_DIR doit etre un depot git, sinon le gate ECHOUE.
+# Override explicite : MEMORY_HEALTH_REPO=/chemin/vers/le/repo
+if [ -n "${MEMORY_HEALTH_REPO:-}" ]; then
+  REPO_DIR="$(cd "$MEMORY_HEALTH_REPO" && pwd)"
+else
+  REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [ ! -d "$REPO_DIR/.git" ]; then
+    echo "release.sh: REPO_DIR ($REPO_DIR) n'est pas un depot git." >&2
+    echo "release.sh: passe MEMORY_HEALTH_REPO=/chemin/vers/le/repo" >&2
+    echo "release.sh: refus d'evaluer un gate qui comparerait la skill a elle-meme." >&2
+    exit 2
+  fi
+fi
 SKILL_DIR="${SKILL_DIR:-$HOME/.openclaw/workspace/skills/memory-health}"
 SKILL_TRACE="${SKILL_TRACE:-$HOME/.openclaw/workspace/skills/trace-extractor/trace-extractor.py}"
 
