@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS memories (
     valid_from TEXT DEFAULT NULL,          -- ISO timestamp, when the fact became true
     source_context TEXT DEFAULT NULL,      -- originating message/prompt (audit trail)
     last_confirmed TEXT DEFAULT NULL,      -- ISO timestamp of last redundant confirmation
+    -- ─── v5.4 FTS body (2026-10-26) ───
+    -- Texte indexe par BM25, DISTINCT de content. Le contenu affichable d'un
+    -- tour LoCoMo porte un prefixe d'annotation "[D13:3] Caroline (3:31 pm on
+    -- 23 August, 2023): " que le FTS5 tokenisait comme du contenu : "on" et
+    -- "2023" sortaient a df=419/419, "caroline" a 339/419 (80,9%). IDF nul sur
+    -- les noms de locuteurs, le signal "guinea" (df=1) etait ecrase 339:1.
+    -- body NULL -> les triggers retombent sur content (comportement historique).
+    body TEXT DEFAULT NULL,
     -- ─── v3.4 point-in-time retrieval ───
     superseded_at TEXT DEFAULT NULL        -- ISO timestamp, when this row STOPPED being
                                            -- active (NULL while it is active). Distinct from
@@ -56,16 +64,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
 
 -- Triggers to keep FTS5 in sync with memories table
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.id, COALESCE(new.body, new.content));
 END;
 
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, COALESCE(old.body, old.content));
 END;
 
 CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, old.content);
-    INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, COALESCE(old.body, old.content));
+    INSERT INTO memories_fts(rowid, content) VALUES (new.id, COALESCE(new.body, new.content));
 END;
 
 -- Trigger: delete from vec on memory deletion

@@ -22,6 +22,7 @@ CLI:
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -168,9 +169,35 @@ def check_ollama_url():
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def normalize_f32(vec: list[float]) -> list[float]:
+    """Ramene un vecteur a la norme 1 (2026-10-26).
+
+    nomic-embed-text renvoie des vecteurs de norme ~20-23 (mesure : requete
+    23,03 · documents 19,64-20,65). vec0 calcule une distance L2 par defaut :
+    sur des vecteurs NON normalises, cette distance mesure autant l'ecart de
+    NORME (donc de longueur de texte) que l'ecart de SENS.
+
+    Consequence mesuree sur conv-26 : la bonne paire question/document avait un
+    cosinus de 0,678, mais sortait au rang 92 sur 419, derriere des tours de
+    longueur voisine (D13:2, distance 17,21 contre 20,93 pour la cible).
+
+    Normaliser rend cos == 1 - d/2 (sur vecteurs unitaires) et remet le
+    classement sur la semantique. Sans effet sur un vecteur deja unitaire.
+    """
+    n = math.sqrt(sum(float(x) * float(x) for x in vec))
+    if n == 0.0 or not math.isfinite(n):
+        return [float(x) for x in vec]
+    return [float(x) / n for x in vec]
+
+
 def serialize_f32(vec: list[float]) -> bytes:
-    """Serialize a float list into little-endian bytes for sqlite-vec."""
-    return struct.pack(f"{len(vec)}f", *vec)
+    """Serialize a float list into little-endian bytes for sqlite-vec.
+
+    v5.4 (2026-10-26) : normalisation systematique. Les deux points d'entree de
+    vec0 (add_memory pour les documents, search_vector pour la requete) passent
+    par ici, donc requete et documents sont dans le meme espace unitaire.
+    """
+    return struct.pack(f"{len(vec)}f", *normalize_f32(vec))
 
 # FIX A -- mordant lexical du FTS5 (15/10).
 #
@@ -689,7 +716,7 @@ class HybridMemoryStore:
 
     def add_memory(self, content: str, category: str = "general", layer: str = "episodic",
                    source: str = "", score: float = 0.0, embedding: list[float] = None,
-                   subject: str = None) -> int:
+                   subject: str = None, body: str = None) -> int:
         """Add a memory chunk with an optional pre-computed embedding and subject.
 
         C4: the hot row and its vector row are inserted in ONE transaction. If the
@@ -702,13 +729,20 @@ class HybridMemoryStore:
         INSERT), which is why 100% of facts had subject=NULL.
         """
         if embedding is None:
+            # v5.4 (2026-10-26) -- correction mesuree : le prefixe d'annotation
+            # est du BRUIT pour BM25 mais du SIGNAL pour le vecteur.
+            #   BM25    : "caroline" passait de df=339/419 (IDF effondre) a 129.
+            #   VECTEUR : retirer le prefixe a fait CHUTER D13:3 du rang 4 a 115.
+            # La question nomme "Caroline" ; le corps du tour ne contient pas son
+            # nom (c'est elle qui parle). Le prefixe est le seul lien.
+            # Donc : FTS voit body (colonne dediee), embedding voit content.
             embedding = get_embedding(content[:2000])
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             cur = self.conn.execute(
-                "INSERT INTO memories (content, category, layer, source, score, subject) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (content, category, layer, source, score, subject)
+                "INSERT INTO memories (content, category, layer, source, score, subject, body) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (content, category, layer, source, score, subject, body)
             )
             mem_id = cur.lastrowid
             self.conn.execute(
