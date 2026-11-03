@@ -47,6 +47,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import sys
 import urllib.error
 import urllib.request
@@ -65,6 +66,11 @@ WORKSPACE = Path(
 ).resolve()
 
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+# v5.4-P1: bounded wait for the write lock. Capture and the nightly cron can
+# legitimately overlap; both must survive a transient lock.
+LOCK_WAIT_SECONDS = 10.0
+LOCK_BACKOFF_SECONDS = 0.25
 
 
 def get_safe_ollama_url(env_var: str, default: str) -> str:
@@ -141,7 +147,7 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # C1/C3 — same trio as HybridMemoryStore: the resolver writes concurrently
     # with the async capture hook and RRF reads, so it needs the same guard.
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=10000")  # v5.4-P1: capture+arbitration overlap
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
@@ -392,8 +398,20 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     # would leave a fact superseded by nothing: silently lost. BEGIN IMMEDIATE
     # takes the write lock up front so the sequence cannot interleave with the
     # async capture hook.
+    # v5.4-P1 resilience: a concurrent writer (live capture + nightly cron) would
+    # otherwise crash the whole pipeline on `database is locked`, losing every
+    # fact already extracted for the turn. Retry with bounded backoff instead.
+    lock_deadline = time.time() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or time.time() >= lock_deadline:
+                raise
+            time.sleep(LOCK_BACKOFF_SECONDS)
+
     try:
-        conn.execute("BEGIN IMMEDIATE")
 
         if rel == CONTRADICTION:
             if conf < DISPUTE_CONFIDENCE_FLOOR:
@@ -551,6 +569,8 @@ def cmd_arbitrate(args):
         print("⚠️  --force without --apply has no effect (analysis is already safe).")
 
     summary = {"added": 0, "superseded": 0, "disputed": 0, "confirmed": 0}
+    lock_failures = 0
+    pending = []
     for obj in facts:
         content = obj.get("content") or obj.get("fact") or ""
         subject = obj.get("subject") or args.subject
@@ -560,10 +580,20 @@ def cmd_arbitrate(args):
         if not prov and obj.get("message_id"):
             prov = ("session=%s message=%s"
                     % (obj.get("session_id") or "-", obj["message_id"]))
-        results = check_fact(conn, content, subject,
-                             use_llm=not args.no_llm, apply=args.apply,
-                             split=not args.no_split,
-                             source_context=prov or content)
+        try:
+            results = check_fact(conn, content, subject,
+                                 use_llm=not args.no_llm, apply=args.apply,
+                                 split=not args.no_split,
+                                 source_context=prov or content)
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            # v5.4-P1: a locked DB must not destroy the whole run. Keep the fact
+            # pending, finish the others, and report it explicitly at the end.
+            lock_failures += 1
+            pending.append(content[:80])
+            print(f"  [LOCKED] {content[:70]}  ← retried, still locked")
+            continue
         for r in results:
             act = (r.get("action") or {}).get("action")
             if act in summary:
@@ -571,6 +601,9 @@ def cmd_arbitrate(args):
             tag = act or r["verdict"]["relation"].lower()
             print(f"  [{tag}] {r['fact'][:70]}  ← {r['verdict']['reasoning']}")
     print(f"\nSummary: {summary}")
+    if lock_failures:
+        print(f"⚠️  LOCKED: {lock_failures} fact(s) not persisted (database busy). "
+              f"Re-run to retry: {pending}")
     if not args.apply:
         print("(dry-run — re-run with --apply to persist)")
     conn.close()
