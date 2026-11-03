@@ -466,7 +466,8 @@ def run_arbitration(buffer_path: str, apply: bool, force: bool,
     return proc.returncode
 
 
-def process_exchange(user_msg: str, assistant_msg: str, args) -> int:
+def process_exchange(user_msg: str, assistant_msg: str, args,
+                     provenance: dict | None = None) -> int:
     if not should_capture(user_msg):
         if args.verbose:
             print("⏭  gated: trivial exchange, no capture.")
@@ -480,7 +481,8 @@ def process_exchange(user_msg: str, assistant_msg: str, args) -> int:
             print("⏭  gated: assistant turn is machine output (echo guard).")
         assistant_msg = ""
 
-    facts = extract_candidate_facts(user_msg, assistant_msg, args.model)
+    facts = extract_candidate_facts(user_msg, assistant_msg, args.model,
+                                    provenance=provenance)
     if not facts:
         if args.verbose:
             print("⏭  no durable fact extracted.")
@@ -511,13 +513,17 @@ def process_transcript(path: str, args) -> int:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and (obj.get("user") or obj.get("assistant")):
-            turns.append((obj.get("user", ""), obj.get("assistant", "")))
+            # v5.4-P1: keep per-turn provenance instead of discarding it.
+            turns.append((obj.get("user", ""), obj.get("assistant", ""),
+                          {"message_id": obj.get("message_id"),
+                           "session_id": obj.get("session_id"),
+                           "ts": obj.get("ts")}))
     if not turns:
         print("⏭  no turns found in transcript.")
         return 0
     rc = 0
     skipped_trivial = 0
-    for user_msg, assistant_msg in turns:
+    for user_msg, assistant_msg, _prov in turns:
         # Gate A (v3.5): a trivial user turn ("Go", "Ok", "Top", a bare ack)
         # carries no durable fact. When the assistant half is a long report, the
         # only "fact" an extractor could produce would be a restatement of the
@@ -528,7 +534,7 @@ def process_transcript(path: str, args) -> int:
             if getattr(args, "verbose", False):
                 print(f"⏭  gated: trivial user turn, no capture. ({user_msg.strip()[:40]!r})")
             continue
-        rc = process_exchange(user_msg, assistant_msg, args) or rc
+        rc = process_exchange(user_msg, assistant_msg, args, provenance=_prov) or rc
     if skipped_trivial and getattr(args, "verbose", False):
         print(f"⏭  {skipped_trivial} trivial turn(s) skipped before extraction.")
     return rc
