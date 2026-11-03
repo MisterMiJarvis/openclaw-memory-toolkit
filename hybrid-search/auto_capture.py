@@ -350,7 +350,7 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
         # A small local model may wrap the JSON in prose or trailing text.
         facts = _salvage_json(content if 'content' in dir() else "")
 
-    return _normalise_facts(facts)
+    return _normalise_facts(facts, provenance)
 
 
 def _salvage_json(text: str):
@@ -369,7 +369,7 @@ def _salvage_json(text: str):
     return []
 
 
-def _normalise_facts(raw) -> list[dict]:
+def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
     """Keep only well-formed, plausible, non-assistant-speculation facts."""
     # A single-object response is a valid one-fact answer: wrap it.
     if isinstance(raw, dict):
@@ -400,9 +400,15 @@ def _normalise_facts(raw) -> list[dict]:
             # token and grounding collapses the key to the fallback word "kavita".
             # Split on underscore too, so each entity word grounds on its own —
             # this is the normalisation-truncation bug that shrank multi-word keys.
-            tokens = [t for t in re.split(r"[^\w]+", subject.replace("_", " ")) if len(t) >= 3]
-            text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", fact.lower()))
-            grounded = [t for t in tokens if t in text_words]
+            # Ground in lowercase on BOTH sides: 'PostgreSQL' in the fact and
+            # 'postgres' in the subject must match. Before this fix the subject
+            # 'postgres_local' collapsed to 'local' because the case differed.
+            tokens = [t.lower() for t in re.split(r"[^\w]+", subject.replace("_", " "))
+                      if len(t) >= 3]
+            text_low = fact.lower()
+            text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", text_low))
+            # Substring grounding: 'postgres' grounds on 'postgresql'.
+            grounded = [t for t in tokens if t in text_words or t in text_low]
             if grounded:
                 # Prefer the grounded token(s) — they are the proven anchor.
                 subject = "_".join(grounded[:2])
