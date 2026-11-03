@@ -115,8 +115,13 @@ def _clean(text: str) -> str:
 
 def fetch_rows(conn: sqlite3.Connection, session_id: str | None,
                since_ms: int | None) -> list[tuple]:
-    """Pull (role, text, timestamp) rows, oldest first."""
-    q = ("SELECT role, text, timestamp FROM session_transcript_fts "
+    """Pull (role, text, timestamp, message_id) rows, oldest first.
+
+    v5.4-P1: message_id is carried through so downstream capture can record
+    provenance back to the exact OpenClaw message. Without it source_context
+    could only ever be a guess.
+    """
+    q = ("SELECT role, text, timestamp, message_id FROM session_transcript_fts "
          "WHERE role IN ('user','assistant')")
     params: list = []
     if session_id:
@@ -145,22 +150,38 @@ def latest_session_id(conn: sqlite3.Connection, since_ms: int | None) -> str | N
 
 
 def rows_to_turns(rows: list[tuple]) -> list[dict]:
-    """Pair each user message with the following assistant reply."""
+    """Pair each user message with the following assistant reply.
+
+    v5.4-P1 provenance contract: every turn carries
+      session_id, message_id (of the user message), ts
+    so that an extracted fact can cite the exact message it came from.
+    Rows may be 3-tuple (legacy) or 4-tuple; the 4th element is message_id.
+    """
     turns: list[dict] = []
     pending_user: str | None = None
-    for role, text, _ts in rows:
+    pending_meta: dict = {}
+    for row in rows:
+        if len(row) >= 4:
+            role, text, ts, msg_id = row[0], row[1], row[2], row[3]
+        else:  # legacy 3-tuple
+            role, text, ts = row
+            msg_id = None
         text = _clean(text)
         if not text:
             continue
         if role == "user":
             if pending_user is not None:
-                turns.append({"user": pending_user, "assistant": ""})
+                turns.append({"user": pending_user, "assistant": "", **pending_meta})
             pending_user = text
+            pending_meta = {"message_id": msg_id, "ts": ts}
         elif role == "assistant" and pending_user is not None:
-            turns.append({"user": pending_user, "assistant": text})
+            turns.append({"user": pending_user, "assistant": text,
+                          "message_id": pending_meta.get("message_id"),
+                          "ts": pending_meta.get("ts")})
             pending_user = None
+            pending_meta = {}
     if pending_user is not None:
-        turns.append({"user": pending_user, "assistant": ""})
+        turns.append({"user": pending_user, "assistant": "", **pending_meta})
     return turns
 
 
@@ -212,6 +233,10 @@ def main():
         for t in turns:
             t["user"] = redact(t["user"])
             t["assistant"] = redact(t["assistant"])
+
+    # v5.4-P1: stamp session_id on every turn (provenance is session-scoped)
+    for t in turns:
+        t["session_id"] = sid
 
     out = Path(args.out)
     with open(out, "w", encoding="utf-8") as fh:

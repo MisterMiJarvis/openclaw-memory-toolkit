@@ -462,7 +462,8 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
 
 def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
                use_llm: bool = True, apply: bool = False,
-               split: bool = True) -> list[dict]:
+               split: bool = True, source_context: str | None = None,
+               source: str = "conflict-resolver") -> list[dict]:
     """Run the full pipeline for one (possibly compound) new statement.
 
     split=False trusts the caller to have supplied an already-atomic fact
@@ -478,16 +479,25 @@ def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
             if best is None or _rel_priority(verdict) > _rel_priority(best[1]):
                 best = (cand, verdict)
         if best is None:
+            action = None
+            if apply:
+                # v5.4-P1: a fact with no candidate must still be INSERTED.
+                # Returning action=None meant "first fact ever" was silently
+                # dropped: nothing was ever persisted for a new subject.
+                action = {"action": "added", "new_id": _insert_fact(
+                    conn, fact, subject, "active", 0.5, source,
+                    source_context or fact, now_iso())}
             results.append({"fact": fact, "verdict": {
                 "relation": COMPATIBLE, "confidence": 0.5,
                 "reasoning": "no active candidate", "engine": "n/a"},
-                "existing_id": None, "action": None})
+                "existing_id": None, "action": action})
             continue
         cand, verdict = best
         action = None
         if apply:
             action = apply_resolution(conn, cand["id"], verdict, fact, subject,
-                                      source_context=text)
+                                      source_context=source_context or text,
+                                      source=source)
         results.append({
             "fact": fact, "existing_id": cand["id"],
             "existing_content": cand["content"],
@@ -544,9 +554,16 @@ def cmd_arbitrate(args):
     for obj in facts:
         content = obj.get("content") or obj.get("fact") or ""
         subject = obj.get("subject") or args.subject
+        # v5.4-P1 provenance: prefer the message-level context carried by the
+        # buffer entry (message_id/session_id) over the raw fact text.
+        prov = obj.get("source_context")
+        if not prov and obj.get("message_id"):
+            prov = ("session=%s message=%s"
+                    % (obj.get("session_id") or "-", obj["message_id"]))
         results = check_fact(conn, content, subject,
                              use_llm=not args.no_llm, apply=args.apply,
-                             split=not args.no_split)
+                             split=not args.no_split,
+                             source_context=prov or content)
         for r in results:
             act = (r.get("action") or {}).get("action")
             if act in summary:

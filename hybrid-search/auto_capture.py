@@ -306,7 +306,8 @@ def should_capture(user_msg: str) -> bool:
 
 
 def extract_candidate_facts(user_msg: str, assistant_msg: str,
-                            model: str = DEFAULT_MODEL) -> list[dict]:
+                            model: str = DEFAULT_MODEL,
+                            provenance: dict | None = None) -> list[dict]:
     """Ask a local LLM for atomic durable facts from the exchange.
 
     Returns [] on any failure — capture must never crash the caller.
@@ -418,8 +419,14 @@ def _normalise_facts(raw) -> list[dict]:
         if re.search(r"\b(peut-être|pourrait|pourrions|éventuellement|"
                      r"il faudrait|on devrait|hypothèse|supposons)\b", fact, re.I):
             continue
-        out.append({"content": fact, "subject": subject,
-                    "confidence": confidence})
+        item_out = {"content": fact, "subject": subject,
+                    "confidence": confidence}
+        # v5.4-P1 provenance: attach the originating message so the resolver can
+        # persist source_context. Without this, a stored fact has no traceable
+        # origin and P1 (retrieval with provenance) cannot pass.
+        if provenance:
+            item_out.update({k: v for k, v in provenance.items() if v is not None})
+        out.append(item_out)
     return out
 
 
