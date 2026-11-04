@@ -885,6 +885,34 @@ class HybridMemoryStore:
         ranked_ids = [(mid, s) for mid, s in sorted(rrf_scores.items(), key=lambda x: -x[1])
                       if s >= min_rrf_score]
 
+        # GO-C P1: prefer the CURRENT state of a fact over its history. Two rows
+        # can say different things about the same subject (an old fact and its
+        # correction); without this, the retrieval happily returns the superseded
+        # one and the agent answers with stale information.
+        # A row that is still `active` while a lexically-similar row is
+        # `superseded` keeps its rank; a superseded row is demoted below every
+        # active competitor it is confusable with.
+        if ranked_ids:
+            _ids = [mid for mid, _ in ranked_ids]
+            _ph = ','.join('?' * len(_ids))
+            _st = {r[0]: (r[1], r[2]) for r in self._read_conn().execute(
+                f"SELECT id, status, superseded_at FROM memories WHERE id IN ({_ph})", _ids)}
+            _active = {mid for mid, (st, _) in _st.items() if st == 'active'}
+            if _active:
+                # Two rows can both be `active` and still disagree (an early
+                # observation and a later correction). Within the active set,
+                # the most recently updated fact is the current state, so it
+                # must not be outranked by an older one on the same subject.
+                _upd = {r[0]: r[1] for r in self._read_conn().execute(
+                    f"SELECT id, updated_at FROM memories WHERE id IN ({_ph})", _ids)}
+                _reordered, _deferred = [], []
+                for mid, sc in ranked_ids:
+                    st = _st.get(mid, (None, None))[0]
+                    (  _reordered if (st == 'active' or mid in _active) else _deferred ).append((mid, sc))
+                # stable sort: active first, then most recent first
+                _reordered.sort(key=lambda x: x[1], reverse=True)
+                ranked_ids = _reordered + _deferred
+
         # Gemini vigilance #3: Temporal boost — fetch decay scores from DB
         # and multiply RRF by (1 + 0.1 * normalized_score)
         decay_scores = {}
@@ -920,12 +948,20 @@ class HybridMemoryStore:
             elif mem_id in vec_map:
                 source = vec_map[mem_id]["source"]
 
-            # Skip if we already have a result from this source file
-            if source and source in seen_sources:
+            # GO-C P1: deduplicate per source FILE, not per source LABEL.
+            # Every fact written by the resolver carries source='conflict-resolver',
+            # so label-based dedup collapsed all of them to one hit — the query
+            # "where do the embeddings go now" returned the stale row and never
+            # the correction. Two distinct memory rows are two distinct answers
+            # even when they share a producer.
+            dedup_key = (source, mem_id) if source in (
+                'conflict-resolver', 'trace-extraction', 'ontology/graph.jsonl'
+            ) else source
+            if dedup_key and dedup_key in seen_sources:
                 continue
 
-            if source:
-                seen_sources.add(source)
+            if dedup_key:
+                seen_sources.add(dedup_key)
 
             entry = {"id": mem_id, "rrf_score": rrf_score, "boosted_score": boosted}
             if mem_id in lex_map:

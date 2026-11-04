@@ -366,9 +366,20 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
 # different objects — and it never exceeds 0.5 confidence, so callers escalate
 # to `disputed` rather than silently destroying a fact.
 _ASSERT_RE = re.compile(
-    r"^\s*(?:le|la|les|l'|on a migr[ée]?|c'est|il y a|the|the main)?\s*"
-    r"(?P<subject>[\w\s\-']{2,40}?)\s+"
-    r"(?:est|sont|tourne sur|utilise|is|runs on|uses|devient|becomes)\s+"
+    r"^\s*(?:le|la|les|l'|l\u2019|on a migr[ée]?|c'est|il y a|the|the main)?\s*"
+    # GO-C P2: the subject must not swallow a trailing "s" from the next word
+    # ('Les embeddings' -> subject 's embeddings'). Requiring a word boundary and
+    # stopping at the article boundary fixes the false split that made two
+    # statements about the same entity look unrelated.
+    r"(?<!\w)(?P<subject>[\w\s\-']{2,40}?)(?=\s)\s+"
+    # GO-C P2: the copula list was too narrow. "a commence", "est passe a",
+    # "migre vers", "va vers" all state a value and must be compared, otherwise
+    # a correction is classified COMPATIBLE and both rows stay active forever.
+    r"(?:est|sont|a commenc[eé]|ont commenc[eé]|a migr[eé]|ont migr[eé]|"
+    r"migre vers|migrent vers|va vers|vont vers|passe [aà]|passent [aà]|"
+    r"tourne sur|tournent sur|tourne sous|tournent sous|utilise|utilisent|"
+    r"is|are|runs on|uses|"
+    r"devient|deviennent|becomes)\s+"
     r"(?P<object>.+?)\s*$",
     re.IGNORECASE,
 )
