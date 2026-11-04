@@ -405,13 +405,24 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     # v5.4-P1 resilience: a concurrent writer (live capture + nightly cron) would
     # otherwise crash the whole pipeline on `database is locked`, losing every
     # fact already extracted for the turn. Retry with bounded backoff instead.
+    # GO-C P0: an implicit transaction may already be open (the INSERT that
+    # created the first fact, or any DML since the last commit). BEGIN IMMEDIATE
+    # then raises "cannot start a transaction within a transaction". Commit the
+    # pending work first, then take the explicit lock.
+    if conn.in_transaction:
+        conn.commit()
+
     lock_deadline = time.time() + LOCK_WAIT_SECONDS
     while True:
         try:
             conn.execute("BEGIN IMMEDIATE")
             break
         except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or time.time() >= lock_deadline:
+            msg = str(e).lower()
+            if "within a transaction" in msg:
+                conn.commit()
+                continue
+            if "locked" not in msg or time.time() >= lock_deadline:
                 raise
             time.sleep(LOCK_BACKOFF_SECONDS)
 
