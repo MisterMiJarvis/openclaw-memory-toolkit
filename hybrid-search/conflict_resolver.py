@@ -43,6 +43,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -559,6 +560,34 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
 EXIT_PARTIAL_FAILURE = 3  # distinct from 1 (usage error) and 2 (crash)
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _queue_lock(db_path: str):
+    """Exclusive lock around every read-modify-write of retry_queue.jsonl.
+
+    GO-E P3: without it, four concurrent writers produced 17 surviving lines out
+    of 80 — 79% silent loss. Each process read the same state, wrote its own
+    .tmp, and the last os.replace overwrote the others; one process even saw its
+    .tmp vanish mid-write (FileNotFoundError).
+
+    The lock is a sidecar file, so it protects the queue without touching the
+    DB's own locking. It is released by the OS if the process dies.
+    """
+    lock_path = Path(db_path).parent / "retry_queue.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 def _edge_uid(payload: dict) -> str:
     """Stable identifier for one retry entry.
 
@@ -592,48 +621,49 @@ def _write_retry_queue(failed: list[dict], db_path: str) -> str:
     qdir = Path(db_path).parent
     queue = qdir / "retry_queue.jsonl"
     ts = _dt.datetime.now().isoformat(timespec="seconds")
+    with _queue_lock(db_path):
 
-    existing = {}
-    if queue.exists():
-        for line in queue.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue          # tolerate a corrupted line rather than abort
-            uid = obj.get("uid") or _edge_uid(obj)
-            existing[uid] = obj
+        existing = {}
+        if queue.exists():
+            for line in queue.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue          # tolerate a corrupted line rather than abort
+                uid = obj.get("uid") or _edge_uid(obj)
+                existing[uid] = obj
 
-    for f in failed:
-        payload = {
-            "content": f.get("content") or "",
-            "subject": f.get("subject"),
-            "source_context": f.get("source_context"),
-            "kind": f.get("kind") or "fact",
-            "lifecycle": f.get("lifecycle"),
-            "confidence": f.get("confidence"),
-            "queued_at": ts,
-            "db": str(db_path),
-        }
-        uid = _edge_uid(payload)
-        if uid in existing:
-            existing[uid]["last_seen_at"] = ts
-            existing[uid]["attempts"] = int(existing[uid].get("attempts", 1)) + 1
-        else:
-            payload["uid"] = uid
-            payload["attempts"] = 1
-            existing[uid] = payload
+        for f in failed:
+            payload = {
+                "content": f.get("content") or "",
+                "subject": f.get("subject"),
+                "source_context": f.get("source_context"),
+                "kind": f.get("kind") or "fact",
+                "lifecycle": f.get("lifecycle"),
+                "confidence": f.get("confidence"),
+                "queued_at": ts,
+                "db": str(db_path),
+            }
+            uid = _edge_uid(payload)
+            if uid in existing:
+                existing[uid]["last_seen_at"] = ts
+                existing[uid]["attempts"] = int(existing[uid].get("attempts", 1)) + 1
+            else:
+                payload["uid"] = uid
+                payload["attempts"] = 1
+                existing[uid] = payload
 
-    tmp = queue.with_suffix(".jsonl.tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        for obj in existing.values():
-            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-    os.replace(tmp, queue)
-    return str(queue)
+        tmp = queue.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for obj in existing.values():
+                fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        os.replace(tmp, queue)
+        return str(queue)
 
 
 def _ack_retry_queue(stored_uids: list[str], db_path: str) -> int:
