@@ -149,6 +149,15 @@ SIGNAL_PATTERNS = [
     re.compile(r"\b(c'est\s+\S+\s+maintenant|est devenu|remplace|"
                r"n'est plus|ne sont plus)\b", re.I),
     re.compile(r"\b(rappel\s*:|info\s*:|pour info|à savoir|config\s*:)\b", re.I),
+    # v5.4-P1: short technical facts carry no verb-of-change ("j'ai migré") but are
+    # durable. "La base PostgreSQL utilise l'image postgres:17-alpine." (7 words)
+    # was dropped by the >=8-words fallback. These markers are unambiguous enough
+    # to promote such a turn without lowering the word threshold (which would
+    # reintroduce the chatter the gate exists to filter).
+    re.compile(r"\b(port|version|image|alpine|LTS|registrar|tourne sur|"
+               r"écoute sur|utilise l'image|est installé|sont installés)\b", re.I),
+    re.compile(r"\b[A-Za-z0-9_.-]+:\d{2,5}\b"),      # host:port
+    re.compile(r"\b[A-Za-z0-9_.-]+:\d+\.\d+"),      # name:major.minor
 ]
 
 
