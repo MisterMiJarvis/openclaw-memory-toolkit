@@ -56,6 +56,19 @@ check("nom vide rejeté", lambda: expect_guard(
 check("modèle local accepté", lambda: MG.assert_not_cloud("qwen2.5:7b"))
 check("embedding local accepté", lambda: MG.assert_not_cloud("nomic-embed-text"))
 
+# ─── GO-C1: contournements du pattern précédent `:cloud\\b` ─────────────────────
+print("\n[1bis] contournements ':cloud\b' fermés")
+for bad in ("x:cloudy", "x:clouds", "x:cloud2", "x:clouds-2", "MODEL:Cloudy",
+            "x-cloud", "x_cloud", "x/cloud", "  x:cloud  "):
+    check(f"{bad!r} refusé", (lambda b=bad: expect_guard(
+        lambda: MG.assert_not_cloud(b), b)))
+
+# ─── faux positifs : les modèles locaux autorisés passent ────────────────────
+print("\n[1ter] faux positifs sur modèles locaux")
+for good in ("qwen2.5:7b", "nomic-embed-text", "nomic-embed-text:latest",
+             "mxbai-embed-large:latest", "llama3.2:3b", "mistral:7b-instruct"):
+    check(f"{good!r} accepté", (lambda g=good: MG.assert_not_cloud(g)))
+
 # ─── garde-fou : endpoint ────────────────────────────────────────────────────
 print("\n[2] refus des endpoints non loopback")
 check("http://10.0.0.5 rejeté", lambda: expect_guard(

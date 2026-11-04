@@ -9,10 +9,25 @@ daemon serves whatever is registered on it, including proxied ":cloud" models
 guards the transport, not the computation: the prompt still leaves the machine.
 
 This module refuses, before any HTTP call is made:
-  * a model whose resolved name carries a ":cloud" suffix
+  * a model whose resolved name carries a cloud marker
   * a model the local daemon does not actually serve
   * an embedding model of the wrong dimension for the schema
   * an endpoint that is not loopback
+
+Cloud rejection policy
+----------------------
+A model name is refused when its tag carries the token `cloud` in ANY form.
+The rule is intentionally broader than the literal suffix ":cloud", because a
+counter-audit proved that the earlier `:cloud\\b` pattern accepted `:cloudy`,
+`:clouds` and `:cloud2` (\\b requires a word boundary, which those lack).
+
+Rejected, case-insensitively, after stripping whitespace:
+  * any tag beginning with `cloud`            :cloud  :cloudy  :clouds  :cloud2
+  * any tag beginning with `clouds`           :clouds  :clouds-2
+  * the token `cloud` bounded by separators   -cloud   _cloud   /cloud
+A false positive is acceptable; a false negative is not. Local models
+authorised by SYN-01 (`qwen2.5:7b`, `nomic-embed-text`) contain no `cloud`
+token and are unaffected.
 
 Everything here fails closed: a doubt is a refusal, never a fallback.
 """
@@ -28,7 +43,15 @@ SYN01_EMBEDDING_MODEL = "nomic-embed-text"
 SYN01_EMBEDDING_DIM = 768
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-CLOUD_SUFFIX = re.compile(r":cloud\b", re.I)
+
+# GO-C1: the counter-audit showed `:cloud\\b` accepted :cloudy/:clouds/:cloud2.
+# Rule: the tag (everything after the last ':' separator that starts a tag) OR
+# any separator-delimited token beginning with "cloud" is rejected. Broader on
+# purpose — a false positive costs a rename, a false negative ships the prompt.
+CLOUD_MARKER = re.compile(
+    r"(?:^|[:/_-])cloud",   # tag or separator-delimited token starting with cloud
+    re.I,
+)
 
 
 class ModelGuardError(RuntimeError):
@@ -56,7 +79,7 @@ def assert_not_cloud(model: str, role: str = "model") -> None:
     """Refuse any model name carrying the ':cloud' marker."""
     if not model or not str(model).strip():
         raise ModelGuardError(f"{role}: empty model name. Refusing (fail-closed).")
-    if CLOUD_SUFFIX.search(str(model)):
+    if CLOUD_MARKER.search(str(model)):
         raise ModelGuardError(
             f"{role}: model {model!r} is a CLOUD model. Local inference cannot be "
             f"guaranteed; the prompt would leave this machine. Refusing (fail-closed)."
