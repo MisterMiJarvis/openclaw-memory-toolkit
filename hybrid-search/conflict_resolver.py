@@ -259,6 +259,26 @@ def fetch_active_facts(conn: sqlite3.Connection, subject: str | None,
             (subject, limit),
         ).fetchall()
 
+    # GO-C P1 idempotence: the same fact is often re-extracted under a different
+    # subject ("kiddo" vs "chat"), so a subject-only lookup finds nothing and the
+    # fact is inserted twice. Always ALSO run the lexical search and merge, so a
+    # re-run of the same transcript cannot create a duplicate.
+    if subject:
+        terms = [t for t in re.findall(r"\w{4,}", content or "")][:6]
+        if terms:
+            fts_q = " OR ".join(f'"{t}"' for t in terms)
+            try:
+                extra = conn.execute(
+                    "SELECT m.* FROM memories_fts f JOIN memories m ON m.id=f.rowid "
+                    "WHERE memories_fts MATCH ? AND m.status='active' "
+                    "ORDER BY bm25(memories_fts) LIMIT ?",
+                    (fts_q, limit),
+                ).fetchall()
+                seen = {r["id"] for r in rows}
+                rows = list(rows) + [r for r in extra if r["id"] not in seen]
+            except sqlite3.OperationalError:
+                pass
+
     if not rows:
         # Lexical fallback: OR the significant terms against FTS5.
         terms = [t for t in re.findall(r"\w{4,}", content or "")][:6]
