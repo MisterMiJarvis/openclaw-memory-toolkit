@@ -462,6 +462,27 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     return action
 
 
+EXIT_PARTIAL_FAILURE = 3  # distinct from 1 (usage error) and 2 (crash)
+
+
+def _write_retry_queue(failed_contents: list[str], db_path: str) -> str:
+    """Persist the facts that could not be written, so nothing is lost silently.
+
+    The queue is a JSONL next to the DB, keyed by content so a plain re-run of
+    the same transcript is idempotent (the resolver will simply confirm the
+    facts that already landed).
+    """
+    import datetime as _dt
+    qdir = Path(db_path).parent
+    queue = qdir / "retry_queue.jsonl"
+    ts = _dt.datetime.now().isoformat(timespec="seconds")
+    with queue.open("a", encoding="utf-8") as fh:
+        for c in failed_contents:
+            fh.write(json.dumps({"content": c, "queued_at": ts,
+                                 "db": str(db_path)}, ensure_ascii=False) + "\n")
+    return str(queue)
+
+
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
                  source_context: str | None, ts: str) -> int:
@@ -606,11 +627,21 @@ def cmd_arbitrate(args):
             print(f"  [{tag}] {r['fact'][:70]}  ← {r['verdict']['reasoning']}")
     print(f"\nSummary: {summary}")
     if lock_failures:
-        print(f"⚠️  LOCKED: {lock_failures} fact(s) not persisted (database busy). "
-              f"Re-run to retry: {pending}")
+        # v5.4-P1 (GO-C P0): a non-persisted fact is NEVER a success.
+        # 1. write a durable retry queue so nothing is lost
+        # 2. return a non-zero exit code so callers cannot mistake this for OK
+        queue = _write_retry_queue(pending, args.db)
+        print(f"⚠️  FAILED: {lock_failures} fact(s) NOT persisted (database busy).")
+        print(f"   retry queue: {queue}")
+        print(f"   re-run: conflict_resolver.py --db {args.db} arbitrate {queue} --apply")
+        if not args.apply:
+            print("(dry-run — re-run with --apply to persist)")
+        conn.close()
+        return EXIT_PARTIAL_FAILURE
     if not args.apply:
         print("(dry-run — re-run with --apply to persist)")
     conn.close()
+    return 0
 
 
 def cmd_lifecycle(args):
@@ -795,9 +826,12 @@ def main():
     args = parser.parse_args()
     if not getattr(args, "func", None):
         parser.print_help()
-        return
-    args.func(args)
+        return 0
+    # v5.4-P1 (GO-C P0): propagate the subcommand's return code. Before this,
+    # `main()` discarded it, so a partially failed run still exited 0 — the
+    # operational false success the audit flagged.
+    return args.func(args)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
