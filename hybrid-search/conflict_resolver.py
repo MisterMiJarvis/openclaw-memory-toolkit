@@ -706,33 +706,83 @@ def _ack_retry_queue(stored_uids: list[str], db_path: str) -> int:
 
 
 def _quarantine_corrupt_queue(db_path: str) -> dict:
-    """Move unparseable queue lines to a side file, never dropping them silently.
+    """Move unparseable queue lines aside, without ever losing a valid one.
 
-    GO-D-fix B: the previous reader did `except JSONDecodeError: continue`, so a
-    corrupted line vanished without a trace. A memory pipeline must not lose
-    evidence quietly — the line is preserved in retry_queue.corrupt.jsonl and
-    reported.
+    GO-E V1.2. It runs inside _queue_lock() and respects one ordering rule that
+    a SIGKILL test proved necessary:
+
+        1. write the side file (append + fsync + replace)
+        2. ONLY THEN rewrite the live queue without the corrupt lines
+
+    The earlier version replaced the live queue independently of the side file.
+    Killed between the two renames, it left the valid lines already rewritten
+    while the corrupt ones were not yet on disk — a valid entry vanished.
+
+    If step 1 fails, step 2 never runs: the queue keeps everything and the next
+    start retries. Corruption is never "resolved" by deletion.
     """
-    queue = Path(db_path).parent / "retry_queue.jsonl"
-    if not queue.exists():
-        return {"corrupt": 0, "valid": 0}
-    valid, corrupt = [], []
-    for line in queue.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    qdir = Path(db_path).parent
+    queue = qdir / "retry_queue.jsonl"
+    side = qdir / "retry_queue.corrupt.jsonl"
+
+    with _queue_lock(db_path):
+        if not queue.exists():
+            return {"corrupt": 0, "valid": 0, "side_file": None}
+
+        raw = queue.read_text(encoding="utf-8").splitlines()
+        valid, corrupt = [], []
+        for line in raw:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+                valid.append(line)
+            except json.JSONDecodeError:
+                corrupt.append(line)
+
+        if not corrupt:
+            return {"corrupt": 0, "valid": len(valid), "side_file": None}
+
+        # ── STEP 1: the side file, durably, BEFORE touching the live queue ──
+        existing = []
+        if side.exists():
+            existing = [l for l in side.read_text(encoding="utf-8").splitlines() if l.strip()]
+        tmp_side = side.with_suffix(".jsonl.tmp")
         try:
-            json.loads(line)
-            valid.append(line)
-        except json.JSONDecodeError:
-            corrupt.append(line)
-    if corrupt:
-        side = Path(db_path).parent / "retry_queue.corrupt.jsonl"
-        with side.open("a", encoding="utf-8") as fh:
-            for c in corrupt:
-                fh.write(c + "\n")
-    return {"corrupt": len(corrupt), "valid": len(valid), "side_file": str(
-        Path(db_path).parent / "retry_queue.corrupt.jsonl") if corrupt else None}
+            with tmp_side.open("w", encoding="utf-8") as fh:
+                for l in existing:
+                    fh.write(l + "\n")
+                for c in corrupt:
+                    fh.write(c + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_side, side)
+            # fsync the directory so the rename itself survives a power cut
+            try:
+                dfd = os.open(str(qdir), os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
+        except Exception:
+            if tmp_side.exists():
+                tmp_side.unlink(missing_ok=True)
+            return {"corrupt": 0, "valid": len(valid), "side_file": None,
+                    "error": "side file write failed; queue left untouched"}
+
+        # ── STEP 2: the live queue, now that the corrupt lines are safe ──
+        tmp_q = queue.with_suffix(".jsonl.q.tmp")
+        with tmp_q.open("w", encoding="utf-8") as fh:
+            for v in valid:
+                fh.write(v + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_q, queue)
+
+    return {"corrupt": len(corrupt), "valid": len(valid), "side_file": str(side)}
 
 
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
