@@ -122,6 +122,28 @@ def resolve_llm_model(explicit: str | None = None) -> str:
     return _resolve_llm_model(explicit=explicit, override_env="CONFLICT_LLM_MODEL")
 
 
+# v5.4-P1 (SYN-01 P0): fail-closed local-model enforcement.
+try:
+    from model_guard import (
+        assert_not_cloud as _assert_not_cloud,
+        assert_loopback as _assert_loopback,
+        ModelGuardError,
+    )
+    _HAVE_GUARD = True
+except ImportError:  # pragma: no cover
+    _HAVE_GUARD = False
+    class ModelGuardError(RuntimeError):
+        pass
+
+
+# v5.4-P1 (SYN-01 P0): generation parameters, identical to auto_capture so a run
+# is reproducible end to end (same seed, same budget, same context window).
+GEN_TEMPERATURE = float(os.environ.get("SYN01_TEMPERATURE", "0.0"))
+GEN_SEED = int(os.environ.get("SYN01_SEED", "1"))
+GEN_NUM_PREDICT = int(os.environ.get("SYN01_NUM_PREDICT", "512"))
+GEN_NUM_CTX = int(os.environ.get("SYN01_NUM_CTX", "4096"))
+
+
 LLM_MODEL = resolve_llm_model(
     os.environ.get("CONFLICT_LLM_MODEL") or os.environ.get("TRACE_LLM_MODEL")
 )
@@ -375,6 +397,10 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
     back to `heuristic_relation()` which is intentionally conservative.
     """
     if use_llm:
+        # v5.4-P1 (SYN-01 P0): fail-closed before any network call.
+        if _HAVE_GUARD:
+            _assert_not_cloud(LLM_MODEL, role="arbitration")
+            _assert_loopback(OLLAMA_GEN_URL, "OLLAMA_GEN_URL")
         prompt = (
             f"{ARBITER_SYSTEM}\n\n"
             f"EXISTANT: {existing}\n"
@@ -386,7 +412,14 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.0},
+            # v5.4-P1 (SYN-01 P0): explicit generation parameters, same values as
+            # the extraction path so a run is reproducible end to end.
+            "options": {
+                "temperature": GEN_TEMPERATURE,
+                "seed": GEN_SEED,
+                "num_predict": GEN_NUM_PREDICT,
+                "num_ctx": GEN_NUM_CTX,
+            },
         }).encode()
         try:
             req = urllib.request.Request(

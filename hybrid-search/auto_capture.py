@@ -81,6 +81,22 @@ def _default_model() -> str:
 
 
 DEFAULT_MODEL = _default_model()
+
+# v5.4-P1 (SYN-01 P0): fail-closed local-model enforcement. A loopback URL does
+# not prove local inference — the daemon happily serves proxied ":cloud" models.
+try:
+    from model_guard import (
+        assert_not_cloud as _assert_not_cloud,
+        assert_loopback as _assert_loopback,
+        assert_served_locally as _assert_served_locally,
+        require_env as _require_env,
+        ModelGuardError,
+    )
+    _HAVE_GUARD = True
+except ImportError:  # pragma: no cover
+    _HAVE_GUARD = False
+    class ModelGuardError(RuntimeError):
+        pass
 GEN_TIMEOUT = int(os.environ.get("AUTO_CAPTURE_TIMEOUT", "60"))
 
 CAPTURE_PROMPT = """Tu es un extracteur de mémoire pour un agent personnel.
@@ -126,6 +142,15 @@ def get_safe_ollama_url(env_var: str, default: str) -> str:
 
 
 OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://127.0.0.1:11434")
+
+# v5.4-P1 (SYN-01 P0): generation parameters sent explicitly on every call.
+# num_ctx=4096 covers the observed need (~2000 tok: system prompt ~400, max turn
+# ~65, max output 512, margin) with 2x headroom, while staying far below the
+# model's 32768 window so the KV-cache is not over-allocated.
+GEN_TEMPERATURE = float(os.environ.get("SYN01_TEMPERATURE", "0.0"))
+GEN_SEED = int(os.environ.get("SYN01_SEED", "1"))
+GEN_NUM_PREDICT = int(os.environ.get("SYN01_NUM_PREDICT", "512"))
+GEN_NUM_CTX = int(os.environ.get("SYN01_NUM_CTX", "4096"))
 
 # ─── Strong-signal gating ─────────────────────────────────────────────────────
 
@@ -326,6 +351,13 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
     if not user_msg:
         return []
 
+    # v5.4-P1 (SYN-01 P0): fail-closed before any network call. A loopback URL
+    # does not prove local inference: the daemon may be serving a proxied
+    # ":cloud" model, in which case the prompt leaves this machine.
+    if _HAVE_GUARD:
+        _assert_not_cloud(model, role="extraction")
+        _assert_loopback(OLLAMA_URL, "OLLAMA_URL")
+
     payload = {
         "model": model,
         "messages": [
@@ -341,7 +373,15 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
         ],
         "format": "json",
         "stream": False,
-        "options": {"temperature": 0.0},
+        # v5.4-P1 (SYN-01 P0): explicit generation parameters. Without seed the
+        # two-run stability test of the plan cannot be interpreted; without
+        # num_predict a chatty model can truncate its JSON mid-object.
+        "options": {
+            "temperature": GEN_TEMPERATURE,
+            "seed": GEN_SEED,
+            "num_predict": GEN_NUM_PREDICT,
+            "num_ctx": GEN_NUM_CTX,
+        },
     }
 
     req = urllib.request.Request(
