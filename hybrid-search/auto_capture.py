@@ -378,6 +378,59 @@ def _salvage_json(text: str):
     return []
 
 
+def _classify(fact: str, subject: str | None) -> tuple[str, str | None]:
+    """Return (kind, lifecycle) for a normalised fact.
+
+    - kind: fact | decision | task
+    - lifecycle: only for decision/task; a plain fact keeps NULL so we never
+      apply a task state machine to an observation.
+    """
+    try:
+        from lifecycle import infer_state, INTENTION_MARKERS
+    except ImportError:  # pragma: no cover - capture must stay runnable
+        return "fact", None
+
+    t = (fact or "").lower()
+
+    # A DECISION marker wins outright: "j'ai décidé de migrer" is a decision,
+    # not a task, even though it contains "migr". Before this ordering, every
+    # decision that mentioned a verb of work was classified as a task.
+    DECISION = (r"\b(décide|décidé|décision|choisi|choix|arbitré|retenu|"
+                r"abandonn|on garde|je garde|nous gardons)")
+    # An EXECUTION/completion marker — past tense, something actually happened.
+    EXECUTION = (r"\b(a terminé|est terminé|terminée|achevé|achevée|"
+                 r"déployé|déployée|installé|installée|exécuté|exécutée|"
+                 r"c'est fait|a été fait|est en production|livré|livrée|"
+                 r"a échoué|a planté)")
+    # A TASK marker — work in progress or blocked.
+    TASK = (r"\b(tâche|commenc|en cours|en chantier|bloqu|coincé|"
+            r"en attente)")
+    # An INTENTION marker — planning, not doing.
+    INTENTION = (r"\b(prévois|prévoir|compte|il faudrait|on devrait|"
+                 r"on pourrait|à terme|un jour|la semaine prochaine|"
+                 r"bientôt|prochainement|peut-être|éventuellement|envisage)")
+
+    has_decision = bool(re.search(DECISION, t))
+    has_execution = bool(re.search(EXECUTION, t))
+    has_task_mark = bool(re.search(TASK, t))
+    has_intention = bool(re.search(INTENTION, t))
+
+    # An intention is never an execution, whatever else the sentence contains.
+    if has_decision:
+        return "decision", infer_state(fact)
+    # An intention about future work is a PLANNED task, not a fact: it must be
+    # visible as `envisaged` so P3 can later ask "what remains, and why?".
+    if has_intention and not has_execution:
+        return "task", "envisaged"
+    if has_task_mark or has_execution:
+        state = infer_state(fact)
+        # Guard: an intention phrase must not be promoted to done.
+        if has_intention and state == "done":
+            state = "envisaged"
+        return "task", state
+    return "fact", None
+
+
 def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
     """Keep only well-formed, plausible, non-assistant-speculation facts."""
     # A single-object response is a valid one-fact answer: wrap it.
@@ -434,8 +487,14 @@ def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
         if re.search(r"\b(peut-être|pourrait|pourrions|éventuellement|"
                      r"il faudrait|on devrait|hypothèse|supposons)\b", fact, re.I):
             continue
+        # v5.4-P1 (GO-C P3): classify what kind of memory this is and where it
+        # sits in its lifecycle. An intention must never be stored as an
+        # execution, so a `done` is only inferred when the evidence carries an
+        # explicit completion marker (see lifecycle.py).
+        kind, life = _classify(fact, subject)
         item_out = {"content": fact, "subject": subject,
-                    "confidence": confidence}
+                    "confidence": confidence,
+                    "kind": kind, "lifecycle": life}
         # v5.4-P1 provenance: attach the originating message so the resolver can
         # persist source_context. Without this, a stored fact has no traceable
         # origin and P1 (retrieval with provenance) cannot pass.

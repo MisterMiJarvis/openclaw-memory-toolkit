@@ -403,7 +403,8 @@ def heuristic_relation(existing: str, new: str) -> dict:
 
 def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
                      new_fact: str, subject: str | None,
-                     source_context: str | None, source: str = "conflict-resolver") -> dict:
+                     source_context: str | None, source: str = "conflict-resolver",
+                     kind: str = "fact", lifecycle: str | None = None) -> dict:
     """Apply one classified resolution. Returns an action summary.
 
     CONTRADICTION -> mark the old fact superseded (status + superseded_by),
@@ -456,12 +457,12 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
                     (ts, existing_id),
                 )
                 new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                      source, source_context, ts)
+                                      source, source_context, ts, kind=kind, lifecycle=lifecycle)
                 action.update(action="disputed", new_id=new_id,
                               note="weak contradiction -> old=disputed, new=active")
             else:
                 new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                      source, source_context, ts)
+                                      source, source_context, ts, kind=kind, lifecycle=lifecycle)
                 conn.execute(
                     "UPDATE memories SET status='superseded', superseded_by=?, "
                     "updated_at=?, superseded_at=? WHERE id=?",
@@ -483,7 +484,7 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
 
         else:  # COMPATIBLE / ADDITION
             new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                  source, source_context, ts)
+                                  source, source_context, ts, kind=kind, lifecycle=lifecycle)
             action.update(action="added", new_id=new_id, note="compatible addition")
 
         conn.commit()
@@ -516,7 +517,8 @@ def _write_retry_queue(failed_contents: list[str], db_path: str) -> str:
 
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
-                 source_context: str | None, ts: str) -> int:
+                 source_context: str | None, ts: str,
+                 kind: str = "fact", lifecycle: str | None = None) -> int:
     """Insert a new fact row (FTS5/vec triggers handle the rest).
 
     Note: no embedding is written here. Vector indexing of new facts is the
@@ -525,9 +527,11 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
     """
     cur = conn.execute(
         "INSERT INTO memories (content, category, layer, source, score, subject, "
-        "status, confidence, valid_from, source_context, last_confirmed, updated_at) "
-        "VALUES (?, 'fact', 'semantic', ?, 0.5, ?, ?, ?, ?, ?, ?, ?)",
-        (content, source, subject, status, confidence, ts, source_context, ts, ts),
+        "status, confidence, valid_from, source_context, last_confirmed, updated_at, "
+        "kind, lifecycle) "
+        "VALUES (?, 'fact', 'semantic', ?, 0.5, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (content, source, subject, status, confidence, ts, source_context, ts, ts,
+         kind, lifecycle),
     )
     return cur.lastrowid
 
@@ -537,7 +541,8 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
 def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
                use_llm: bool = True, apply: bool = False,
                split: bool = True, source_context: str | None = None,
-               source: str = "conflict-resolver") -> list[dict]:
+               source: str = "conflict-resolver",
+               kind: str = "fact", lifecycle: str | None = None) -> list[dict]:
     """Run the full pipeline for one (possibly compound) new statement.
 
     split=False trusts the caller to have supplied an already-atomic fact
@@ -560,7 +565,8 @@ def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
                 # dropped: nothing was ever persisted for a new subject.
                 action = {"action": "added", "new_id": _insert_fact(
                     conn, fact, subject, "active", 0.5, source,
-                    source_context or fact, now_iso())}
+                    source_context or fact, now_iso(),
+                    kind=kind, lifecycle=lifecycle)}
             results.append({"fact": fact, "verdict": {
                 "relation": COMPATIBLE, "confidence": 0.5,
                 "reasoning": "no active candidate", "engine": "n/a"},
@@ -571,7 +577,8 @@ def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
         if apply:
             action = apply_resolution(conn, cand["id"], verdict, fact, subject,
                                       source_context=source_context or text,
-                                      source=source)
+                                      source=source,
+                                      kind=kind, lifecycle=lifecycle)
         results.append({
             "fact": fact, "existing_id": cand["id"],
             "existing_content": cand["content"],
@@ -597,6 +604,8 @@ def cmd_check(args):
                      use_llm=not args.no_llm, apply=args.apply,
                      split=not args.no_split)
     print(json.dumps(res, indent=2, ensure_ascii=False))
+    if args.apply and conn.in_transaction:
+        conn.commit()
     if not args.apply:
         print("\n(analyse only — pass --apply to mutate the DB)")
     conn.close()
@@ -640,7 +649,9 @@ def cmd_arbitrate(args):
             results = check_fact(conn, content, subject,
                                  use_llm=not args.no_llm, apply=args.apply,
                                  split=not args.no_split,
-                                 source_context=prov or content)
+                                 source_context=prov or content,
+                                 kind=obj.get("kind") or "fact",
+                                 lifecycle=obj.get("lifecycle"))
         except sqlite3.OperationalError as e:
             if "locked" not in str(e).lower():
                 raise
@@ -669,6 +680,12 @@ def cmd_arbitrate(args):
             print("(dry-run — re-run with --apply to persist)")
         conn.close()
         return EXIT_PARTIAL_FAILURE
+    if args.apply:
+        # GO-C P3: apply_resolution commits per fact, but a trailing BEGIN
+        # IMMEDIATE from the next iteration can leave one open. Commit the
+        # remainder explicitly so nothing is lost at close().
+        if conn.in_transaction:
+            conn.commit()
     if not args.apply:
         print("(dry-run — re-run with --apply to persist)")
     conn.close()

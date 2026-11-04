@@ -43,10 +43,14 @@ TRANSITIONS = {
 # A completion must be CLAIMED in the past tense. Bare "prévoir", "compter",
 # "je vais", "il faudrait" are not execution evidence.
 EXECUTION_MARKERS = re.compile(
-    r"\b(j'ai (terminé|fini|déployé|installé|exécuté|lancé|vérifié|rendu|publié)|"
-    r"c'est fait|terminé|achevé|déployé|livré|exécuté|vérifié|"
-    r"a (été )?(terminé|déployé|installé|exécuté)|"
-    r"est (terminé|déployé|installé|fait|en production))\b",
+    r"\b(j'ai (terminé|terminee?|fini|fini[e]?|déployé|deploye[e]?|installé|"
+    r"installe[e]?|exécuté|execute[e]?|lancé|lance[e]?|vérifié|verifie[e]?|"
+    r"rendu|publié|publie[e]?)|"
+    r"c'est fait|terminé|terminee?|achevé|acheve[e]?|déployé|deploye[e]?|"
+    r"livré|livre[e]?|exécuté|execute[e]?|vérifié|verifie[e]?|"
+    r"a (été )?(terminé|terminee?|déployé|deploye[e]?|installé|installe[e]?|exécuté|execute[e]?)|"
+    r"est (terminé|terminee?|déployé|deploye[e]?|installé|installe[e]?|fait|en production)|"
+    r"sont (terminés|terminees?|déployés|deployes?|installés|installes?))\b",
     re.I,
 )
 
@@ -56,6 +60,16 @@ INTENTION_MARKERS = re.compile(
     r"il faudrait|on devrait|on pourrait|à terme|un jour|"
     r"la semaine prochaine|demain|bientôt|prochainement|"
     r"peut-être|éventuellement|envisage)\b",
+    re.I,
+)
+
+# Participle forms: "est terminée/déployée/installée" — the marker above only
+# matched the masculine. French agreement was silently defeating completion
+# detection, which is exactly the kind of hole that turns a done task into an
+# "envisaged" one.
+EXECUTION_MARKERS_F = re.compile(
+    r"\b(est (terminée|déployée|installée|achevée|livrée|exécutée)|"
+    r"sont (terminées|déployées|installées|achevées|livrées|exécutées))\b",
     re.I,
 )
 
@@ -84,7 +98,7 @@ def infer_state(text: str, explicit: str | None = None) -> str:
         return "envisaged"
     if BLOCKED_MARKERS.search(t):
         return "blocked"
-    if EXECUTION_MARKERS.search(t):
+    if EXECUTION_MARKERS.search(t) or EXECUTION_MARKERS_F.search(t):
         return "done"
     if re.search(r"\b(j'ai commencé|en cours|je travaille sur|en chantier)\b", t, re.I):
         return "started"
