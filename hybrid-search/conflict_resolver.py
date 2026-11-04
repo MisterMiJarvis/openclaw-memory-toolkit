@@ -636,6 +636,74 @@ def _write_retry_queue(failed: list[dict], db_path: str) -> str:
     return str(queue)
 
 
+def _ack_retry_queue(stored_uids: list[str], db_path: str) -> int:
+    """Remove entries that are now durably persisted (GO-D-fix A).
+
+    Until this existed, a fact that failed once and succeeded on replay stayed in
+    the queue forever: every subsequent replay re-processed it. That is not data
+    loss, but it is a queue that never empties, and it hides real failures behind
+    a growing list of already-done work.
+
+    The ack is written atomically (temp + fsync + replace) so a crash mid-ack
+    cannot truncate the remaining entries.
+    """
+    queue = Path(db_path).parent / "retry_queue.jsonl"
+    if not queue.exists() or not stored_uids:
+        return 0
+    keep, removed = [], 0
+    for line in queue.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            keep.append(line)          # corrupt lines are handled by quarantine
+            continue
+        if obj.get("uid") in stored_uids:
+            removed += 1
+            continue
+        keep.append(json.dumps(obj, ensure_ascii=False))
+
+    tmp = queue.with_suffix(".jsonl.ack.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for ln in keep:
+            fh.write(ln + "\n")
+        fh.flush(); os.fsync(fh.fileno())
+    os.replace(tmp, queue)
+    return removed
+
+
+def _quarantine_corrupt_queue(db_path: str) -> dict:
+    """Move unparseable queue lines to a side file, never dropping them silently.
+
+    GO-D-fix B: the previous reader did `except JSONDecodeError: continue`, so a
+    corrupted line vanished without a trace. A memory pipeline must not lose
+    evidence quietly — the line is preserved in retry_queue.corrupt.jsonl and
+    reported.
+    """
+    queue = Path(db_path).parent / "retry_queue.jsonl"
+    if not queue.exists():
+        return {"corrupt": 0, "valid": 0}
+    valid, corrupt = [], []
+    for line in queue.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            json.loads(line)
+            valid.append(line)
+        except json.JSONDecodeError:
+            corrupt.append(line)
+    if corrupt:
+        side = Path(db_path).parent / "retry_queue.corrupt.jsonl"
+        with side.open("a", encoding="utf-8") as fh:
+            for c in corrupt:
+                fh.write(c + "\n")
+    return {"corrupt": len(corrupt), "valid": len(valid), "side_file": str(
+        Path(db_path).parent / "retry_queue.corrupt.jsonl") if corrupt else None}
+
+
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
                  source_context: str | None, ts: str,
@@ -738,7 +806,15 @@ def cmd_arbitrate(args):
     path = Path(args.file)
     if not path.exists():
         raise SystemExit(f"❌ facts file not found: {path}")
+    # GO-D-fix B: a corrupt line must not vanish. Quarantine it first, then
+    # read only the valid entries.
+    q = _quarantine_corrupt_queue(args.db)
+    if q.get("corrupt"):
+        print(f"⚠️  QUEUE: {q['corrupt']} ligne(s) corrompue(s) mise(s) en quarantaine "
+              f"-> {q['side_file']}")
+
     facts = []
+    _incoming_uids = []
     malformed = 0
     for line in path.read_text().splitlines():
         line = line.strip()
@@ -746,6 +822,8 @@ def cmd_arbitrate(args):
             continue
         try:
             obj = json.loads(line)
+            if isinstance(obj, dict) and obj.get("uid"):
+                _incoming_uids.append(obj["uid"])
             facts.append(obj if isinstance(obj, dict) else {"content": str(obj)})
         except json.JSONDecodeError:
             # GO-D P4: a non-JSON line is a CORRUPT buffer, not a fact. The old
@@ -823,6 +901,12 @@ def cmd_arbitrate(args):
         # remainder explicitly so nothing is lost at close().
         if conn.in_transaction:
             conn.commit()
+        # GO-D-fix A: acknowledge the entries that actually landed. Without this
+        # a replayed queue never empties: every future replay re-processes facts
+        # that are already stored, indefinitely.
+        acked = _ack_retry_queue(_incoming_uids, args.db)
+        if acked:
+            print(f"✅ ack: {acked} entr(ies) retirée(s) de retry_queue.jsonl")
     if not args.apply:
         print("(dry-run — re-run with --apply to persist)")
     conn.close()
