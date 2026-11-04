@@ -677,31 +677,32 @@ def _ack_retry_queue(stored_uids: list[str], db_path: str) -> int:
     The ack is written atomically (temp + fsync + replace) so a crash mid-ack
     cannot truncate the remaining entries.
     """
-    queue = Path(db_path).parent / "retry_queue.jsonl"
-    if not queue.exists() or not stored_uids:
-        return 0
-    keep, removed = [], 0
-    for line in queue.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            keep.append(line)          # corrupt lines are handled by quarantine
-            continue
-        if obj.get("uid") in stored_uids:
-            removed += 1
-            continue
-        keep.append(json.dumps(obj, ensure_ascii=False))
+    with _queue_lock(db_path):
+        queue = Path(db_path).parent / "retry_queue.jsonl"
+        if not queue.exists() or not stored_uids:
+            return 0
+        keep, removed = [], 0
+        for line in queue.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                keep.append(line)          # corrupt lines are handled by quarantine
+                continue
+            if obj.get("uid") in stored_uids:
+                removed += 1
+                continue
+            keep.append(json.dumps(obj, ensure_ascii=False))
 
-    tmp = queue.with_suffix(".jsonl.ack.tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        for ln in keep:
-            fh.write(ln + "\n")
-        fh.flush(); os.fsync(fh.fileno())
-    os.replace(tmp, queue)
-    return removed
+        tmp = queue.with_suffix(".jsonl.ack.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for ln in keep:
+                fh.write(ln + "\n")
+            fh.flush(); os.fsync(fh.fileno())
+        os.replace(tmp, queue)
+        return removed
 
 
 def _quarantine_corrupt_queue(db_path: str) -> dict:
