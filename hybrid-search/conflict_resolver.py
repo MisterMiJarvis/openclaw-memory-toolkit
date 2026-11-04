@@ -243,6 +243,39 @@ def extract_atomic(text: str) -> list[str]:
 
 # ─── Step 2: targeted retrieval of concurrent active facts ────────────────────
 
+def normalise_subject(text: str) -> str | None:
+    """Extract the LOGICAL entity a sentence is about (GO-D P2).
+
+    "L'utilisateur a commence la migration de ses embeddings vers X" is a
+    statement about the *embeddings*, not about the user. Comparing grammatical
+    subjects therefore misses contradictions between two sentences that talk
+    about the same entity. This returns the logical subject so both rows land
+    on the same key.
+
+    Order matters:
+      1. "ses X" / "son X"  -> X   (possessive refers to the real object)
+      2. "les X" / "le X"   -> X
+      3. first capitalised token, but only if it is not a sentence opener
+    """
+    if not text:
+        return None
+    t = text.strip()
+
+    m = re.search(r"\b(?:de\s+)?(?:ses|son|sa)\s+([a-z\u00e0-\u00ff][\w-]{3,})", t.lower())
+    if m:
+        return m.group(1)
+
+    m = re.match(r"\s*(?:les?|la|l'|l\u2019)\s+([a-z\u00e0-\u00ff][\w-]{3,})", t.lower())
+    if m:
+        return m.group(1)
+
+    STOP = {"l'utilisateur", "utilisateur", "le", "la", "les", "je", "il", "on", "c'est"}
+    for tok in re.findall(r"\b([A-Z][A-Za-z0-9_-]{2,})\b", t):
+        if tok.lower() not in STOP:
+            return tok.lower()
+    return None
+
+
 def fetch_active_facts(conn: sqlite3.Connection, subject: str | None,
                        content: str, limit: int = 5) -> list[dict]:
     """Pull candidate facts, restricted to status='active'.
@@ -252,11 +285,29 @@ def fetch_active_facts(conn: sqlite3.Connection, subject: str | None,
     contradiction phrased with different words still surfaces.
     """
     rows: list[sqlite3.Row] = []
-    if subject:
+    # GO-D P2: fall back to the LOGICAL subject when the grammatical one is a
+    # generic role word ("utilisateur"), otherwise a correction phrased with a
+    # different grammatical subject is never compared to the original.
+    lookup_subject = subject
+    if not lookup_subject or str(lookup_subject).lower() in (
+        "utilisateur", "user", "l_utilisateur",
+    ):
+        lookup_subject = normalise_subject(content) or subject
+
+    # GO-D P2: searching with the logical subject is useless if the stored rows
+    # still carry the grammatical one. The lookup must therefore also match the
+    # raw subject, so an older row stored as 'utilisateur' is still found when
+    # the new fact normalises to 'embeddings'.
+    candidates_for = [lookup_subject]
+    if subject and subject != lookup_subject:
+        candidates_for.append(subject)
+
+    if lookup_subject:
+        placeholders = ",".join("?" * len(candidates_for))
         rows = conn.execute(
-            "SELECT * FROM memories WHERE status='active' AND subject=? "
+            f"SELECT * FROM memories WHERE status='active' AND subject IN ({placeholders}) "
             "ORDER BY updated_at DESC LIMIT ?",
-            (subject, limit),
+            (*candidates_for, limit),
         ).fetchall()
 
     # GO-C P1 idempotence: the same fact is often re-extracted under a different
@@ -688,6 +739,7 @@ def cmd_arbitrate(args):
     if not path.exists():
         raise SystemExit(f"❌ facts file not found: {path}")
     facts = []
+    malformed = 0
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -696,13 +748,21 @@ def cmd_arbitrate(args):
             obj = json.loads(line)
             facts.append(obj if isinstance(obj, dict) else {"content": str(obj)})
         except json.JSONDecodeError:
-            facts.append({"content": line})
+            # GO-D P4: a non-JSON line is a CORRUPT buffer, not a fact. The old
+            # code promoted the raw text to {"content": line}, so a truncated
+            # write or a stray log line became a memory entry — "NOT JSON AT ALL"
+            # was inserted verbatim by the tests. Corrupt lines are counted and
+            # skipped; they never reach the database.
+            malformed += 1
+            continue
 
     if not args.apply and not args.force:
         print(f"⚠️  DRY-RUN: {len(facts)} fact(s) will be analysed, no mutation.")
     elif not args.apply:
         print("⚠️  --force without --apply has no effect (analysis is already safe).")
 
+    if malformed:
+        print(f"⚠️  BUFFER: {malformed} malformed line(s) skipped (not facts).")
     summary = {"added": 0, "superseded": 0, "disputed": 0, "confirmed": 0}
     lock_failures = 0
     pending = []
