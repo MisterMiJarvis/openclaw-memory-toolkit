@@ -169,6 +169,10 @@ def ensure_lifecycle_columns(conn: sqlite3.Connection) -> list[str]:
         "source_context": "TEXT DEFAULT NULL",
         "last_confirmed": "TEXT DEFAULT NULL",
         "superseded_at": "TEXT DEFAULT NULL",
+        # v5.4-P1 (P3): what kind of memory this is, and where it sits in its
+        # lifecycle. An intention must never be mistaken for an execution.
+        "kind": "TEXT DEFAULT 'fact'",
+        "lifecycle": "TEXT DEFAULT NULL",
     }
     existing = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
     added = []
