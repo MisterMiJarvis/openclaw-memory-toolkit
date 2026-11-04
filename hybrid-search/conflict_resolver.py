@@ -508,21 +508,80 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
 EXIT_PARTIAL_FAILURE = 3  # distinct from 1 (usage error) and 2 (crash)
 
 
-def _write_retry_queue(failed_contents: list[str], db_path: str) -> str:
-    """Persist the facts that could not be written, so nothing is lost silently.
+def _edge_uid(payload: dict) -> str:
+    """Stable identifier for one retry entry.
 
-    The queue is a JSONL next to the DB, keyed by content so a plain re-run of
-    the same transcript is idempotent (the resolver will simply confirm the
-    facts that already landed).
+    Derived from the fact's own identity, never from wall-clock time, so the
+    same unpersisted fact queued twice collapses to one entry (GO-D P0).
+    """
+    import hashlib as _h
+    key = "\x1f".join([
+        str(payload.get("content") or ""),
+        str(payload.get("subject") or ""),
+        str(payload.get("source_context") or ""),
+        str(payload.get("kind") or "fact"),
+        str(payload.get("lifecycle") or ""),
+    ])
+    return _h.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _write_retry_queue(failed: list[dict], db_path: str) -> str:
+    """Persist the facts that could not be written — COMPLETE, not truncated.
+
+    GO-D P0: the previous version kept content[:80] and dropped subject,
+    provenance, kind and lifecycle. A queue like that cannot be replayed: the
+    fact comes back mangled and its source is gone. This version keeps the full
+    payload plus a stable uid, and de-duplicates by uid so a second lock does
+    not append the same entry twice.
+
+    The write is atomic (temp + rename): an interruption during the queue
+    write must not leave a half-line that breaks JSONL parsing on replay.
     """
     import datetime as _dt
     qdir = Path(db_path).parent
     queue = qdir / "retry_queue.jsonl"
     ts = _dt.datetime.now().isoformat(timespec="seconds")
-    with queue.open("a", encoding="utf-8") as fh:
-        for c in failed_contents:
-            fh.write(json.dumps({"content": c, "queued_at": ts,
-                                 "db": str(db_path)}, ensure_ascii=False) + "\n")
+
+    existing = {}
+    if queue.exists():
+        for line in queue.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue          # tolerate a corrupted line rather than abort
+            uid = obj.get("uid") or _edge_uid(obj)
+            existing[uid] = obj
+
+    for f in failed:
+        payload = {
+            "content": f.get("content") or "",
+            "subject": f.get("subject"),
+            "source_context": f.get("source_context"),
+            "kind": f.get("kind") or "fact",
+            "lifecycle": f.get("lifecycle"),
+            "confidence": f.get("confidence"),
+            "queued_at": ts,
+            "db": str(db_path),
+        }
+        uid = _edge_uid(payload)
+        if uid in existing:
+            existing[uid]["last_seen_at"] = ts
+            existing[uid]["attempts"] = int(existing[uid].get("attempts", 1)) + 1
+        else:
+            payload["uid"] = uid
+            payload["attempts"] = 1
+            existing[uid] = payload
+
+    tmp = queue.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for obj in existing.values():
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    os.replace(tmp, queue)
     return str(queue)
 
 
@@ -669,7 +728,14 @@ def cmd_arbitrate(args):
             # v5.4-P1: a locked DB must not destroy the whole run. Keep the fact
             # pending, finish the others, and report it explicitly at the end.
             lock_failures += 1
-            pending.append(content[:80])
+            pending.append({
+                "content": content,
+                "subject": subject,
+                "source_context": prov or content,
+                "kind": obj.get("kind") or "fact",
+                "lifecycle": obj.get("lifecycle"),
+                "confidence": obj.get("confidence"),
+            })
             print(f"  [LOCKED] {content[:70]}  ← retried, still locked")
             continue
         for r in results:

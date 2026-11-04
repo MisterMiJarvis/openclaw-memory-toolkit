@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS memories (
     valid_from TEXT DEFAULT NULL,          -- ISO timestamp, when the fact became true
     source_context TEXT DEFAULT NULL,      -- originating message/prompt (audit trail)
     last_confirmed TEXT DEFAULT NULL,      -- ISO timestamp of last redundant confirmation
+    -- ─── v5.4-P1 (GO-D P0): kind + lifecycle ───
+    -- Without these in the CREATE, a fresh database (HybridMemoryStore) had no
+    -- such columns and every write failed with "no column named kind". The
+    -- migration in conflict_resolver only patched EXISTING databases.
+    kind TEXT DEFAULT 'fact'
+        CHECK (kind IS NULL OR kind IN ('fact', 'decision', 'task', 'activity')),
+    lifecycle TEXT DEFAULT NULL
+        CHECK (lifecycle IS NULL OR lifecycle IN
+               ('envisaged','decided','started','blocked','done','cancelled')),
     -- ─── v5.4 FTS body (2026-10-26) ───
     -- Texte indexe par BM25, DISTINCT de content. Le contenu affichable d'un
     -- tour LoCoMo porte un prefixe d'annotation "[D13:3] Caroline (3:31 pm on
