@@ -154,6 +154,7 @@ DISPUTE_CONFIDENCE_FLOOR = 0.6
 
 # P0-A observabilite: counters for vector coverage during a run.
 _LAST_VEC_STATUS = {"ok": 0, "failed": 0, "last_error": None}
+_VEC_LOAD_ERROR = None
 
 
 def vector_status() -> dict:
@@ -183,6 +184,22 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")  # v5.4-P1: capture+arbitration overlap
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # P0-A: vec0 must be loaded on THIS connection to write memories_vec.
+    # Reading memories_vec_rowids works without it (plain table), so the gap was
+    # invisible until an INSERT was attempted — that is what produced
+    # "no such module: vec0" in the auto_capture subprocess.
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        try:
+            conn.load_extension(sqlite_vec.loadable_path())
+        finally:
+            conn.enable_load_extension(False)
+    except Exception as e:  # noqa: BLE001
+        # Do not swallow: record it so _insert_fact can fail loudly.
+        global _VEC_LOAD_ERROR
+        _VEC_LOAD_ERROR = f"{type(e).__name__}: {e}"
     return conn
 
 
@@ -871,6 +888,14 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                 "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
                 (mem_id, serialize_f32(embedding)),
             )
+        except sqlite3.OperationalError as e:
+            if "vec0" in str(e) or "no such module" in str(e):
+                # Infrastructure failure, not a fact-level problem: surface it.
+                raise RuntimeError(
+                    f"vector indexing unavailable on this connection: {e}. "
+                    f"load error at connect(): {_VEC_LOAD_ERROR}"
+                ) from e
+            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
         except Exception as e:  # noqa: BLE001
             vec_error = f"vec insert failed: {type(e).__name__}: {e}"
 
