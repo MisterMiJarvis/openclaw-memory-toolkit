@@ -42,10 +42,12 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -446,11 +448,62 @@ def run_arbitration(buffer_path: str, apply: bool, force: bool,
         cmd.append("--no-llm")
     if no_split:
         cmd.append("--no-split")
+    t_start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    t_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0 and proc.stderr:
         sys.stderr.write(proc.stderr)
+
+    # P0-A: post-execution vector coverage report, read from the database — not
+    # from in-memory counters that die with the subprocess.
+    try:
+        _report_vector_coverage(db, t_start, t_end, proc.returncode)
+    except Exception as e:  # noqa: BLE001 - a report failure must not mask the run
+        print(f"⚠️  vector coverage report unavailable: {type(e).__name__}: {e}",
+              file=sys.stderr)
     return proc.returncode
+
+
+def _report_vector_coverage(db: str, t_start: str, t_end: str, rc: int) -> None:
+    """Print GLOBAL and WINDOW coverage; RUN attribution stays UNKNOWN.
+
+    The database has no run marker: `source` identifies the producer, not the
+    invocation, and created_at has one-second granularity. Anything attributed
+    to "this run" by id range would be a guess.
+    """
+    if not os.path.exists(db):
+        print("📊 vector coverage: database missing — UNKNOWN")
+        return
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+    try:
+        conn.execute("BEGIN")          # one read transaction: both levels agree
+        g_tot, g_vec = conn.execute(
+            "SELECT COUNT(*), COUNT(v.rowid) FROM memories m "
+            "LEFT JOIN memories_vec_rowids v ON v.rowid = m.id "
+            "WHERE m.source = 'conflict-resolver'").fetchone()
+        w_tot, w_vec = conn.execute(
+            "SELECT COUNT(*), COUNT(v.rowid) FROM memories m "
+            "LEFT JOIN memories_vec_rowids v ON v.rowid = m.id "
+            "WHERE m.source = 'conflict-resolver' "
+            "AND m.created_at >= ? AND m.created_at <= ?",
+            (t_start, t_end)).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    def ratio(vec, tot):
+        return f"{vec}/{tot}" + (f" = {100*vec/tot:.1f}%" if tot else "")
+
+    status = "FAILED" if rc != 0 else ("UNKNOWN" if w_tot == 0 else
+              ("COMPLETE" if w_vec == w_tot else "PARTIAL"))
+    print("📊 vector coverage")
+    print(f"   returncode          : {rc}")
+    print(f"   GLOBAL  producteur  : {ratio(g_vec, g_tot)}")
+    print(f"   WINDOW  {t_start} → {t_end} : {ratio(w_vec, w_tot)}"
+          f"{'  (peut inclure des écritures concurrentes)' if w_tot else ''}")
+    print(f"   RUN attribution     : UNKNOWN (aucun marqueur de run en base)")
+    print(f"   status              : {status}")
 
 
 def process_exchange(user_msg: str, assistant_msg: str, args) -> int:
