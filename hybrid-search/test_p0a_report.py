@@ -46,28 +46,28 @@ def capture(db, rc=0):
         ac._report_vector_coverage(db, "2000-01-01 00:00:00", "2099-01-01 00:00:00", rc)
     return buf.getvalue()
 
-print("\n[1] succès complet : GLOBAL et WINDOW à 100%")
+print("\n[1] succès complet : WINDOW_COMPLETE, GLOBAL et WINDOW à 100%")
 def _complete():
     db = fresh(); add_fact(db, "Le carrelage sera beige.")
     out = capture(db, 0)
     assert "1/1 = 100.0%" in out, out
-    assert "COMPLETE" in out, out
+    assert "WINDOW_COMPLETE" in out, out
     assert "UNKNOWN" in out, "RUN doit rester UNKNOWN"
 
-print("\n[2] fait sans vecteur : PARTIAL")
+print("\n[2] fait sans vecteur : WINDOW_PARTIAL")
 def _partial():
     db = fresh(); add_fact(db, "Le devis B est signe.", with_vec=True)
     add_fact(db, "Fait sans vecteur.", with_vec=False)
     out = capture(db, 0)
     assert "1/2 = 50.0%" in out, out
-    assert "PARTIAL" in out, out
+    assert "WINDOW_PARTIAL" in out, out
 
-print("\n[3] run sans nouveau fait : UNKNOWN, pas COMPLETE")
+print("\n[3] run sans nouveau fait : UNKNOWN, jamais WINDOW_COMPLETE")
 def _empty():
     db = fresh()
     out = capture(db, 0)
     assert "UNKNOWN" in out, out
-    assert "COMPLETE" not in out, out
+    assert "WINDOW_COMPLETE" not in out, out
 
 print("\n[4] échec transactionnel : FAILED avec returncode affiché")
 def _failed():

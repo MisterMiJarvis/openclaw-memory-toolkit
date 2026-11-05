@@ -495,9 +495,13 @@ def _report_vector_coverage(db: str, t_start: str, t_end: str, rc: int) -> None:
     def ratio(vec, tot):
         return f"{vec}/{tot}" + (f" = {100*vec/tot:.1f}%" if tot else "")
 
+    # WINDOW_COMPLETE, jamais COMPLETE : la fenêtre peut contenir des écritures
+    # concurrentes, et l'attribution au run reste UNKNOWN. Aucun libellé ne doit
+    # suggérer qu'un run entier est vectorisé.
     status = "FAILED" if rc != 0 else ("UNKNOWN" if w_tot == 0 else
-              ("COMPLETE" if w_vec == w_tot else "PARTIAL"))
+              ("WINDOW_COMPLETE" if w_vec == w_tot else "WINDOW_PARTIAL"))
     print("📊 vector coverage")
+    print(f"   base                : {db}")
     print(f"   returncode          : {rc}")
     print(f"   GLOBAL  producteur  : {ratio(g_vec, g_tot)}")
     print(f"   WINDOW  {t_start} → {t_end} : {ratio(w_vec, w_tot)}"
