@@ -152,6 +152,16 @@ LLM_MODEL = resolve_llm_model(
 # instead of being auto-superseded (a wrong supersede destroys a truth).
 DISPUTE_CONFIDENCE_FLOOR = 0.6
 
+# P0-A observabilite: counters for vector coverage during a run.
+_LAST_VEC_STATUS = {"ok": 0, "failed": 0, "last_error": None}
+
+
+def vector_status() -> dict:
+    """Return and reset the vector indexing counters for this run."""
+    snap = dict(_LAST_VEC_STATUS)
+    _LAST_VEC_STATUS.update({"ok": 0, "failed": 0, "last_error": None})
+    return snap
+
 # Relation labels
 CONTRADICTION = "CONTRADICTION"
 REDUNDANT = "REDUNDANT"
@@ -822,12 +832,28 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
                  source_context: str | None, ts: str,
                  kind: str = "fact", lifecycle: str | None = None) -> int:
-    """Insert a new fact row (FTS5/vec triggers handle the rest).
+    """Insert a new fact row AND its vector embedding.
 
-    Note: no embedding is written here. Vector indexing of new facts is the
-    job of a subsequent `hybrid_search.py add`/`index` pass — the arbitrator
-    stays LLM-embedding-free so it can run offline.
+    v5.4-P1 (P0-A): the previous version wrote the row and relied on a
+    "subsequent index pass" that does not exist in auto_capture. 339/339
+    conflict-resolver facts in production had zero embeddings, making them
+    invisible to search_vector while still visible to BM25 — a silent index
+    drift.
+
+    The embedding is computed BEFORE opening the write transaction: the model
+    call can take seconds and must not hold the SQLite write lock. If the
+    embedding fails, the fact is still inserted but the row is left without a
+    vector and the caller is told (vec_ok=False), so nothing is lost and the
+    drift is observable rather than silent.
     """
+    embedding = None
+    vec_error = None
+    try:
+        from hybrid_search import get_embedding, serialize_f32
+        embedding = get_embedding(content[:2000])
+    except Exception as e:  # noqa: BLE001 - any embedder failure is non-fatal
+        vec_error = f"{type(e).__name__}: {e}"
+
     cur = conn.execute(
         "INSERT INTO memories (content, category, layer, source, score, subject, "
         "status, confidence, valid_from, source_context, last_confirmed, updated_at, "
@@ -836,7 +862,21 @@ def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
         (content, source, subject, status, confidence, ts, source_context, ts, ts,
          kind, lifecycle),
     )
-    return cur.lastrowid
+    mem_id = cur.lastrowid
+
+    if embedding is not None:
+        try:
+            from hybrid_search import serialize_f32
+            conn.execute(
+                "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
+                (mem_id, serialize_f32(embedding)),
+            )
+        except Exception as e:  # noqa: BLE001
+            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
+
+    _LAST_VEC_STATUS["ok" if (embedding is not None and vec_error is None) else "failed"] += 1
+    _LAST_VEC_STATUS["last_error"] = vec_error
+    return mem_id
 
 
 # ─── High-level flows ─────────────────────────────────────────────────────────
