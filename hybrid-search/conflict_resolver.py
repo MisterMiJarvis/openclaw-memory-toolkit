@@ -60,6 +60,17 @@ _HERE = Path(__file__).resolve().parent
 DB_PATH = os.environ.get(
     "MEMORY_DB", str(_HERE / "agent_memory.db")
 )
+
+# P0-A observability: vector indexing counters for this process.
+_VEC_LOAD_ERROR = None
+_LAST_VEC_STATUS = {"ok": 0, "failed": 0, "last_error": None}
+
+
+def vector_status() -> dict:
+    """Return and reset the vector indexing counters."""
+    snap = dict(_LAST_VEC_STATUS)
+    _LAST_VEC_STATUS.update({"ok": 0, "failed": 0, "last_error": None})
+    return snap
 WORKSPACE = Path(
     os.environ.get("WORKSPACE", str(Path.home() / ".openclaw" / "workspace"))
 ).resolve()
@@ -144,6 +155,20 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # P0-A backport: vec0 must be loaded on THIS connection to write
+    # memories_vec. Reading memories_vec_rowids works without it (plain table),
+    # which is why the gap went unnoticed until an INSERT was attempted.
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        try:
+            conn.load_extension(sqlite_vec.loadable_path())
+        finally:
+            conn.enable_load_extension(False)
+    except Exception as e:  # noqa: BLE001 - recorded, surfaced by _insert_fact
+        global _VEC_LOAD_ERROR
+        _VEC_LOAD_ERROR = f"{type(e).__name__}: {e}"
     return conn
 
 
@@ -443,19 +468,54 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
                  source_context: str | None, ts: str) -> int:
-    """Insert a new fact row (FTS5/vec triggers handle the rest).
+    """Insert a new fact row AND its vector embedding.
 
-    Note: no embedding is written here. Vector indexing of new facts is the
-    job of a subsequent `hybrid_search.py add`/`index` pass — the arbitrator
-    stays LLM-embedding-free so it can run offline.
+    P0-A backport: the previous version wrote the row and relied on a
+    "subsequent index pass" that auto_capture never performs, so captured facts
+    were visible to BM25 and invisible to search_vector.
+
+    The embedding is computed BEFORE the write so the model call never holds
+    the SQLite write lock. If it fails, the fact is still inserted (no data
+    loss) and the failure is recorded for the caller.
     """
+    embedding = None
+    vec_error = None
+    try:
+        from hybrid_search import get_embedding
+        embedding = get_embedding(content[:2000])
+    except Exception as e:  # noqa: BLE001 - embedder failure is non-fatal
+        vec_error = f"{type(e).__name__}: {e}"
+
     cur = conn.execute(
         "INSERT INTO memories (content, category, layer, source, score, subject, "
         "status, confidence, valid_from, source_context, last_confirmed, updated_at) "
         "VALUES (?, 'fact', 'semantic', ?, 0.5, ?, ?, ?, ?, ?, ?, ?)",
         (content, source, subject, status, confidence, ts, source_context, ts, ts),
     )
-    return cur.lastrowid
+    mem_id = cur.lastrowid
+
+    if embedding is not None:
+        try:
+            from hybrid_search import serialize_f32
+            conn.execute(
+                "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
+                (mem_id, serialize_f32(embedding)),
+            )
+        except sqlite3.OperationalError as e:
+            if "vec0" in str(e) or "no such module" in str(e):
+                # Infrastructure failure, not a fact-level problem: surface it.
+                raise RuntimeError(
+                    f"vector indexing unavailable on this connection: {e}. "
+                    f"load error at connect(): {_VEC_LOAD_ERROR}"
+                ) from e
+            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001
+            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
+
+    _LAST_VEC_STATUS["ok" if vec_error is None and embedding is not None else "failed"] += 1
+    if vec_error:
+        _LAST_VEC_STATUS["last_error"] = vec_error
+    return mem_id
 
 
 # ─── High-level flows ─────────────────────────────────────────────────────────
