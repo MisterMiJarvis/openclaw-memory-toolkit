@@ -81,22 +81,6 @@ def _default_model() -> str:
 
 
 DEFAULT_MODEL = _default_model()
-
-# v5.4-P1 (SYN-01 P0): fail-closed local-model enforcement. A loopback URL does
-# not prove local inference — the daemon happily serves proxied ":cloud" models.
-try:
-    from model_guard import (
-        assert_not_cloud as _assert_not_cloud,
-        assert_loopback as _assert_loopback,
-        assert_served_locally as _assert_served_locally,
-        require_env as _require_env,
-        ModelGuardError,
-    )
-    _HAVE_GUARD = True
-except ImportError:  # pragma: no cover
-    _HAVE_GUARD = False
-    class ModelGuardError(RuntimeError):
-        pass
 GEN_TIMEOUT = int(os.environ.get("AUTO_CAPTURE_TIMEOUT", "60"))
 
 CAPTURE_PROMPT = """Tu es un extracteur de mémoire pour un agent personnel.
@@ -143,15 +127,6 @@ def get_safe_ollama_url(env_var: str, default: str) -> str:
 
 OLLAMA_URL = get_safe_ollama_url("OLLAMA_URL", "http://127.0.0.1:11434")
 
-# v5.4-P1 (SYN-01 P0): generation parameters sent explicitly on every call.
-# num_ctx=4096 covers the observed need (~2000 tok: system prompt ~400, max turn
-# ~65, max output 512, margin) with 2x headroom, while staying far below the
-# model's 32768 window so the KV-cache is not over-allocated.
-GEN_TEMPERATURE = float(os.environ.get("SYN01_TEMPERATURE", "0.0"))
-GEN_SEED = int(os.environ.get("SYN01_SEED", "1"))
-GEN_NUM_PREDICT = int(os.environ.get("SYN01_NUM_PREDICT", "512"))
-GEN_NUM_CTX = int(os.environ.get("SYN01_NUM_CTX", "4096"))
-
 # ─── Strong-signal gating ─────────────────────────────────────────────────────
 
 TRIVIAL_PATTERN = re.compile(
@@ -174,15 +149,6 @@ SIGNAL_PATTERNS = [
     re.compile(r"\b(c'est\s+\S+\s+maintenant|est devenu|remplace|"
                r"n'est plus|ne sont plus)\b", re.I),
     re.compile(r"\b(rappel\s*:|info\s*:|pour info|à savoir|config\s*:)\b", re.I),
-    # v5.4-P1: short technical facts carry no verb-of-change ("j'ai migré") but are
-    # durable. "La base PostgreSQL utilise l'image postgres:17-alpine." (7 words)
-    # was dropped by the >=8-words fallback. These markers are unambiguous enough
-    # to promote such a turn without lowering the word threshold (which would
-    # reintroduce the chatter the gate exists to filter).
-    re.compile(r"\b(port|version|image|alpine|LTS|registrar|tourne sur|"
-               r"écoute sur|utilise l'image|est installé|sont installés)\b", re.I),
-    re.compile(r"\b[A-Za-z0-9_.-]+:\d{2,5}\b"),      # host:port
-    re.compile(r"\b[A-Za-z0-9_.-]+:\d+\.\d+"),      # name:major.minor
 ]
 
 
@@ -340,8 +306,7 @@ def should_capture(user_msg: str) -> bool:
 
 
 def extract_candidate_facts(user_msg: str, assistant_msg: str,
-                            model: str = DEFAULT_MODEL,
-                            provenance: dict | None = None) -> list[dict]:
+                            model: str = DEFAULT_MODEL) -> list[dict]:
     """Ask a local LLM for atomic durable facts from the exchange.
 
     Returns [] on any failure — capture must never crash the caller.
@@ -350,13 +315,6 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
     assistant_msg = (assistant_msg or "").strip()
     if not user_msg:
         return []
-
-    # v5.4-P1 (SYN-01 P0): fail-closed before any network call. A loopback URL
-    # does not prove local inference: the daemon may be serving a proxied
-    # ":cloud" model, in which case the prompt leaves this machine.
-    if _HAVE_GUARD:
-        _assert_not_cloud(model, role="extraction")
-        _assert_loopback(OLLAMA_URL, "OLLAMA_URL")
 
     payload = {
         "model": model,
@@ -373,15 +331,7 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
         ],
         "format": "json",
         "stream": False,
-        # v5.4-P1 (SYN-01 P0): explicit generation parameters. Without seed the
-        # two-run stability test of the plan cannot be interpreted; without
-        # num_predict a chatty model can truncate its JSON mid-object.
-        "options": {
-            "temperature": GEN_TEMPERATURE,
-            "seed": GEN_SEED,
-            "num_predict": GEN_NUM_PREDICT,
-            "num_ctx": GEN_NUM_CTX,
-        },
+        "options": {"temperature": 0.0},
     }
 
     req = urllib.request.Request(
@@ -399,7 +349,7 @@ def extract_candidate_facts(user_msg: str, assistant_msg: str,
         # A small local model may wrap the JSON in prose or trailing text.
         facts = _salvage_json(content if 'content' in dir() else "")
 
-    return _normalise_facts(facts, provenance)
+    return _normalise_facts(facts)
 
 
 def _salvage_json(text: str):
@@ -418,60 +368,7 @@ def _salvage_json(text: str):
     return []
 
 
-def _classify(fact: str, subject: str | None) -> tuple[str, str | None]:
-    """Return (kind, lifecycle) for a normalised fact.
-
-    - kind: fact | decision | task
-    - lifecycle: only for decision/task; a plain fact keeps NULL so we never
-      apply a task state machine to an observation.
-    """
-    try:
-        from lifecycle import infer_state, INTENTION_MARKERS
-    except ImportError:  # pragma: no cover - capture must stay runnable
-        return "fact", None
-
-    t = (fact or "").lower()
-
-    # A DECISION marker wins outright: "j'ai décidé de migrer" is a decision,
-    # not a task, even though it contains "migr". Before this ordering, every
-    # decision that mentioned a verb of work was classified as a task.
-    DECISION = (r"\b(décide|décidé|décision|choisi|choix|arbitré|retenu|"
-                r"abandonn|on garde|je garde|nous gardons)")
-    # An EXECUTION/completion marker — past tense, something actually happened.
-    EXECUTION = (r"\b(a terminé|est terminé|terminée|achevé|achevée|"
-                 r"déployé|déployée|installé|installée|exécuté|exécutée|"
-                 r"c'est fait|a été fait|est en production|livré|livrée|"
-                 r"a échoué|a planté)")
-    # A TASK marker — work in progress or blocked.
-    TASK = (r"\b(tâche|commenc|en cours|en chantier|bloqu|coincé|"
-            r"en attente)")
-    # An INTENTION marker — planning, not doing.
-    INTENTION = (r"\b(prévois|prévoir|compte|il faudrait|on devrait|"
-                 r"on pourrait|à terme|un jour|la semaine prochaine|"
-                 r"bientôt|prochainement|peut-être|éventuellement|envisage)")
-
-    has_decision = bool(re.search(DECISION, t))
-    has_execution = bool(re.search(EXECUTION, t))
-    has_task_mark = bool(re.search(TASK, t))
-    has_intention = bool(re.search(INTENTION, t))
-
-    # An intention is never an execution, whatever else the sentence contains.
-    if has_decision:
-        return "decision", infer_state(fact)
-    # An intention about future work is a PLANNED task, not a fact: it must be
-    # visible as `envisaged` so P3 can later ask "what remains, and why?".
-    if has_intention and not has_execution:
-        return "task", "envisaged"
-    if has_task_mark or has_execution:
-        state = infer_state(fact)
-        # Guard: an intention phrase must not be promoted to done.
-        if has_intention and state == "done":
-            state = "envisaged"
-        return "task", state
-    return "fact", None
-
-
-def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
+def _normalise_facts(raw) -> list[dict]:
     """Keep only well-formed, plausible, non-assistant-speculation facts."""
     # A single-object response is a valid one-fact answer: wrap it.
     if isinstance(raw, dict):
@@ -502,15 +399,9 @@ def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
             # token and grounding collapses the key to the fallback word "kavita".
             # Split on underscore too, so each entity word grounds on its own —
             # this is the normalisation-truncation bug that shrank multi-word keys.
-            # Ground in lowercase on BOTH sides: 'PostgreSQL' in the fact and
-            # 'postgres' in the subject must match. Before this fix the subject
-            # 'postgres_local' collapsed to 'local' because the case differed.
-            tokens = [t.lower() for t in re.split(r"[^\w]+", subject.replace("_", " "))
-                      if len(t) >= 3]
-            text_low = fact.lower()
-            text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", text_low))
-            # Substring grounding: 'postgres' grounds on 'postgresql'.
-            grounded = [t for t in tokens if t in text_words or t in text_low]
+            tokens = [t for t in re.split(r"[^\w]+", subject.replace("_", " ")) if len(t) >= 3]
+            text_words = set(re.findall(r"[\w\u00c0-\u00ff]+", fact.lower()))
+            grounded = [t for t in tokens if t in text_words]
             if grounded:
                 # Prefer the grounded token(s) — they are the proven anchor.
                 subject = "_".join(grounded[:2])
@@ -527,20 +418,8 @@ def _normalise_facts(raw, provenance: dict | None = None) -> list[dict]:
         if re.search(r"\b(peut-être|pourrait|pourrions|éventuellement|"
                      r"il faudrait|on devrait|hypothèse|supposons)\b", fact, re.I):
             continue
-        # v5.4-P1 (GO-C P3): classify what kind of memory this is and where it
-        # sits in its lifecycle. An intention must never be stored as an
-        # execution, so a `done` is only inferred when the evidence carries an
-        # explicit completion marker (see lifecycle.py).
-        kind, life = _classify(fact, subject)
-        item_out = {"content": fact, "subject": subject,
-                    "confidence": confidence,
-                    "kind": kind, "lifecycle": life}
-        # v5.4-P1 provenance: attach the originating message so the resolver can
-        # persist source_context. Without this, a stored fact has no traceable
-        # origin and P1 (retrieval with provenance) cannot pass.
-        if provenance:
-            item_out.update({k: v for k, v in provenance.items() if v is not None})
-        out.append(item_out)
+        out.append({"content": fact, "subject": subject,
+                    "confidence": confidence})
     return out
 
 
@@ -574,8 +453,7 @@ def run_arbitration(buffer_path: str, apply: bool, force: bool,
     return proc.returncode
 
 
-def process_exchange(user_msg: str, assistant_msg: str, args,
-                     provenance: dict | None = None) -> int:
+def process_exchange(user_msg: str, assistant_msg: str, args) -> int:
     if not should_capture(user_msg):
         if args.verbose:
             print("⏭  gated: trivial exchange, no capture.")
@@ -589,8 +467,7 @@ def process_exchange(user_msg: str, assistant_msg: str, args,
             print("⏭  gated: assistant turn is machine output (echo guard).")
         assistant_msg = ""
 
-    facts = extract_candidate_facts(user_msg, assistant_msg, args.model,
-                                    provenance=provenance)
+    facts = extract_candidate_facts(user_msg, assistant_msg, args.model)
     if not facts:
         if args.verbose:
             print("⏭  no durable fact extracted.")
@@ -621,17 +498,13 @@ def process_transcript(path: str, args) -> int:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and (obj.get("user") or obj.get("assistant")):
-            # v5.4-P1: keep per-turn provenance instead of discarding it.
-            turns.append((obj.get("user", ""), obj.get("assistant", ""),
-                          {"message_id": obj.get("message_id"),
-                           "session_id": obj.get("session_id"),
-                           "ts": obj.get("ts")}))
+            turns.append((obj.get("user", ""), obj.get("assistant", "")))
     if not turns:
         print("⏭  no turns found in transcript.")
         return 0
     rc = 0
     skipped_trivial = 0
-    for user_msg, assistant_msg, _prov in turns:
+    for user_msg, assistant_msg in turns:
         # Gate A (v3.5): a trivial user turn ("Go", "Ok", "Top", a bare ack)
         # carries no durable fact. When the assistant half is a long report, the
         # only "fact" an extractor could produce would be a restatement of the
@@ -642,7 +515,7 @@ def process_transcript(path: str, args) -> int:
             if getattr(args, "verbose", False):
                 print(f"⏭  gated: trivial user turn, no capture. ({user_msg.strip()[:40]!r})")
             continue
-        rc = process_exchange(user_msg, assistant_msg, args, provenance=_prov) or rc
+        rc = process_exchange(user_msg, assistant_msg, args) or rc
     if skipped_trivial and getattr(args, "verbose", False):
         print(f"⏭  {skipped_trivial} trivial turn(s) skipped before extraction.")
     return rc

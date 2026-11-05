@@ -43,12 +43,10 @@ Usage:
 """
 
 import argparse
-import fcntl
 import json
 import os
 import re
 import sqlite3
-import time
 import sys
 import urllib.error
 import urllib.request
@@ -67,11 +65,6 @@ WORKSPACE = Path(
 ).resolve()
 
 ALLOWED_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1"}
-
-# v5.4-P1: bounded wait for the write lock. Capture and the nightly cron can
-# legitimately overlap; both must survive a transient lock.
-LOCK_WAIT_SECONDS = 10.0
-LOCK_BACKOFF_SECONDS = 0.25
 
 
 def get_safe_ollama_url(env_var: str, default: str) -> str:
@@ -122,28 +115,6 @@ def resolve_llm_model(explicit: str | None = None) -> str:
     return _resolve_llm_model(explicit=explicit, override_env="CONFLICT_LLM_MODEL")
 
 
-# v5.4-P1 (SYN-01 P0): fail-closed local-model enforcement.
-try:
-    from model_guard import (
-        assert_not_cloud as _assert_not_cloud,
-        assert_loopback as _assert_loopback,
-        ModelGuardError,
-    )
-    _HAVE_GUARD = True
-except ImportError:  # pragma: no cover
-    _HAVE_GUARD = False
-    class ModelGuardError(RuntimeError):
-        pass
-
-
-# v5.4-P1 (SYN-01 P0): generation parameters, identical to auto_capture so a run
-# is reproducible end to end (same seed, same budget, same context window).
-GEN_TEMPERATURE = float(os.environ.get("SYN01_TEMPERATURE", "0.0"))
-GEN_SEED = int(os.environ.get("SYN01_SEED", "1"))
-GEN_NUM_PREDICT = int(os.environ.get("SYN01_NUM_PREDICT", "512"))
-GEN_NUM_CTX = int(os.environ.get("SYN01_NUM_CTX", "4096"))
-
-
 LLM_MODEL = resolve_llm_model(
     os.environ.get("CONFLICT_LLM_MODEL") or os.environ.get("TRACE_LLM_MODEL")
 )
@@ -151,17 +122,6 @@ LLM_MODEL = resolve_llm_model(
 # Confidence below which a weak contradiction is escalated to `disputed`
 # instead of being auto-superseded (a wrong supersede destroys a truth).
 DISPUTE_CONFIDENCE_FLOOR = 0.6
-
-# P0-A observabilite: counters for vector coverage during a run.
-_LAST_VEC_STATUS = {"ok": 0, "failed": 0, "last_error": None}
-_VEC_LOAD_ERROR = None
-
-
-def vector_status() -> dict:
-    """Return and reset the vector indexing counters for this run."""
-    snap = dict(_LAST_VEC_STATUS)
-    _LAST_VEC_STATUS.update({"ok": 0, "failed": 0, "last_error": None})
-    return snap
 
 # Relation labels
 CONTRADICTION = "CONTRADICTION"
@@ -181,25 +141,9 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # C1/C3 — same trio as HybridMemoryStore: the resolver writes concurrently
     # with the async capture hook and RRF reads, so it needs the same guard.
-    conn.execute("PRAGMA busy_timeout=10000")  # v5.4-P1: capture+arbitration overlap
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-
-    # P0-A: vec0 must be loaded on THIS connection to write memories_vec.
-    # Reading memories_vec_rowids works without it (plain table), so the gap was
-    # invisible until an INSERT was attempted — that is what produced
-    # "no such module: vec0" in the auto_capture subprocess.
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        try:
-            conn.load_extension(sqlite_vec.loadable_path())
-        finally:
-            conn.enable_load_extension(False)
-    except Exception as e:  # noqa: BLE001
-        # Do not swallow: record it so _insert_fact can fail loudly.
-        global _VEC_LOAD_ERROR
-        _VEC_LOAD_ERROR = f"{type(e).__name__}: {e}"
     return conn
 
 
@@ -219,10 +163,6 @@ def ensure_lifecycle_columns(conn: sqlite3.Connection) -> list[str]:
         "source_context": "TEXT DEFAULT NULL",
         "last_confirmed": "TEXT DEFAULT NULL",
         "superseded_at": "TEXT DEFAULT NULL",
-        # v5.4-P1 (P3): what kind of memory this is, and where it sits in its
-        # lifecycle. An intention must never be mistaken for an execution.
-        "kind": "TEXT DEFAULT 'fact'",
-        "lifecycle": "TEXT DEFAULT NULL",
     }
     existing = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
     added = []
@@ -293,39 +233,6 @@ def extract_atomic(text: str) -> list[str]:
 
 # ─── Step 2: targeted retrieval of concurrent active facts ────────────────────
 
-def normalise_subject(text: str) -> str | None:
-    """Extract the LOGICAL entity a sentence is about (GO-D P2).
-
-    "L'utilisateur a commence la migration de ses embeddings vers X" is a
-    statement about the *embeddings*, not about the user. Comparing grammatical
-    subjects therefore misses contradictions between two sentences that talk
-    about the same entity. This returns the logical subject so both rows land
-    on the same key.
-
-    Order matters:
-      1. "ses X" / "son X"  -> X   (possessive refers to the real object)
-      2. "les X" / "le X"   -> X
-      3. first capitalised token, but only if it is not a sentence opener
-    """
-    if not text:
-        return None
-    t = text.strip()
-
-    m = re.search(r"\b(?:de\s+)?(?:ses|son|sa)\s+([a-z\u00e0-\u00ff][\w-]{3,})", t.lower())
-    if m:
-        return m.group(1)
-
-    m = re.match(r"\s*(?:les?|la|l'|l\u2019)\s+([a-z\u00e0-\u00ff][\w-]{3,})", t.lower())
-    if m:
-        return m.group(1)
-
-    STOP = {"l'utilisateur", "utilisateur", "le", "la", "les", "je", "il", "on", "c'est"}
-    for tok in re.findall(r"\b([A-Z][A-Za-z0-9_-]{2,})\b", t):
-        if tok.lower() not in STOP:
-            return tok.lower()
-    return None
-
-
 def fetch_active_facts(conn: sqlite3.Connection, subject: str | None,
                        content: str, limit: int = 5) -> list[dict]:
     """Pull candidate facts, restricted to status='active'.
@@ -335,50 +242,12 @@ def fetch_active_facts(conn: sqlite3.Connection, subject: str | None,
     contradiction phrased with different words still surfaces.
     """
     rows: list[sqlite3.Row] = []
-    # GO-D P2: fall back to the LOGICAL subject when the grammatical one is a
-    # generic role word ("utilisateur"), otherwise a correction phrased with a
-    # different grammatical subject is never compared to the original.
-    lookup_subject = subject
-    if not lookup_subject or str(lookup_subject).lower() in (
-        "utilisateur", "user", "l_utilisateur",
-    ):
-        lookup_subject = normalise_subject(content) or subject
-
-    # GO-D P2: searching with the logical subject is useless if the stored rows
-    # still carry the grammatical one. The lookup must therefore also match the
-    # raw subject, so an older row stored as 'utilisateur' is still found when
-    # the new fact normalises to 'embeddings'.
-    candidates_for = [lookup_subject]
-    if subject and subject != lookup_subject:
-        candidates_for.append(subject)
-
-    if lookup_subject:
-        placeholders = ",".join("?" * len(candidates_for))
-        rows = conn.execute(
-            f"SELECT * FROM memories WHERE status='active' AND subject IN ({placeholders}) "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (*candidates_for, limit),
-        ).fetchall()
-
-    # GO-C P1 idempotence: the same fact is often re-extracted under a different
-    # subject ("kiddo" vs "chat"), so a subject-only lookup finds nothing and the
-    # fact is inserted twice. Always ALSO run the lexical search and merge, so a
-    # re-run of the same transcript cannot create a duplicate.
     if subject:
-        terms = [t for t in re.findall(r"\w{4,}", content or "")][:6]
-        if terms:
-            fts_q = " OR ".join(f'"{t}"' for t in terms)
-            try:
-                extra = conn.execute(
-                    "SELECT m.* FROM memories_fts f JOIN memories m ON m.id=f.rowid "
-                    "WHERE memories_fts MATCH ? AND m.status='active' "
-                    "ORDER BY bm25(memories_fts) LIMIT ?",
-                    (fts_q, limit),
-                ).fetchall()
-                seen = {r["id"] for r in rows}
-                rows = list(rows) + [r for r in extra if r["id"] not in seen]
-            except sqlite3.OperationalError:
-                pass
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE status='active' AND subject=? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (subject, limit),
+        ).fetchall()
 
     if not rows:
         # Lexical fallback: OR the significant terms against FTS5.
@@ -424,10 +293,6 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
     back to `heuristic_relation()` which is intentionally conservative.
     """
     if use_llm:
-        # v5.4-P1 (SYN-01 P0): fail-closed before any network call.
-        if _HAVE_GUARD:
-            _assert_not_cloud(LLM_MODEL, role="arbitration")
-            _assert_loopback(OLLAMA_GEN_URL, "OLLAMA_GEN_URL")
         prompt = (
             f"{ARBITER_SYSTEM}\n\n"
             f"EXISTANT: {existing}\n"
@@ -439,14 +304,7 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            # v5.4-P1 (SYN-01 P0): explicit generation parameters, same values as
-            # the extraction path so a run is reproducible end to end.
-            "options": {
-                "temperature": GEN_TEMPERATURE,
-                "seed": GEN_SEED,
-                "num_predict": GEN_NUM_PREDICT,
-                "num_ctx": GEN_NUM_CTX,
-            },
+            "options": {"temperature": 0.0},
         }).encode()
         try:
             req = urllib.request.Request(
@@ -478,20 +336,9 @@ def classify_relation(existing: str, new: str, use_llm: bool = True) -> dict:
 # different objects — and it never exceeds 0.5 confidence, so callers escalate
 # to `disputed` rather than silently destroying a fact.
 _ASSERT_RE = re.compile(
-    r"^\s*(?:le|la|les|l'|l\u2019|on a migr[ée]?|c'est|il y a|the|the main)?\s*"
-    # GO-C P2: the subject must not swallow a trailing "s" from the next word
-    # ('Les embeddings' -> subject 's embeddings'). Requiring a word boundary and
-    # stopping at the article boundary fixes the false split that made two
-    # statements about the same entity look unrelated.
-    r"(?<!\w)(?P<subject>[\w\s\-']{2,40}?)(?=\s)\s+"
-    # GO-C P2: the copula list was too narrow. "a commence", "est passe a",
-    # "migre vers", "va vers" all state a value and must be compared, otherwise
-    # a correction is classified COMPATIBLE and both rows stay active forever.
-    r"(?:est|sont|a commenc[eé]|ont commenc[eé]|a migr[eé]|ont migr[eé]|"
-    r"migre vers|migrent vers|va vers|vont vers|passe [aà]|passent [aà]|"
-    r"tourne sur|tournent sur|tourne sous|tournent sous|utilise|utilisent|"
-    r"is|are|runs on|uses|"
-    r"devient|deviennent|becomes)\s+"
+    r"^\s*(?:le|la|les|l'|on a migr[ée]?|c'est|il y a|the|the main)?\s*"
+    r"(?P<subject>[\w\s\-']{2,40}?)\s+"
+    r"(?:est|sont|tourne sur|utilise|is|runs on|uses|devient|becomes)\s+"
     r"(?P<object>.+?)\s*$",
     re.IGNORECASE,
 )
@@ -526,8 +373,7 @@ def heuristic_relation(existing: str, new: str) -> dict:
 
 def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
                      new_fact: str, subject: str | None,
-                     source_context: str | None, source: str = "conflict-resolver",
-                     kind: str = "fact", lifecycle: str | None = None) -> dict:
+                     source_context: str | None, source: str = "conflict-resolver") -> dict:
     """Apply one classified resolution. Returns an action summary.
 
     CONTRADICTION -> mark the old fact superseded (status + superseded_by),
@@ -546,31 +392,8 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     # would leave a fact superseded by nothing: silently lost. BEGIN IMMEDIATE
     # takes the write lock up front so the sequence cannot interleave with the
     # async capture hook.
-    # v5.4-P1 resilience: a concurrent writer (live capture + nightly cron) would
-    # otherwise crash the whole pipeline on `database is locked`, losing every
-    # fact already extracted for the turn. Retry with bounded backoff instead.
-    # GO-C P0: an implicit transaction may already be open (the INSERT that
-    # created the first fact, or any DML since the last commit). BEGIN IMMEDIATE
-    # then raises "cannot start a transaction within a transaction". Commit the
-    # pending work first, then take the explicit lock.
-    if conn.in_transaction:
-        conn.commit()
-
-    lock_deadline = time.time() + LOCK_WAIT_SECONDS
-    while True:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            break
-        except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            if "within a transaction" in msg:
-                conn.commit()
-                continue
-            if "locked" not in msg or time.time() >= lock_deadline:
-                raise
-            time.sleep(LOCK_BACKOFF_SECONDS)
-
     try:
+        conn.execute("BEGIN IMMEDIATE")
 
         if rel == CONTRADICTION:
             if conf < DISPUTE_CONFIDENCE_FLOOR:
@@ -580,12 +403,12 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
                     (ts, existing_id),
                 )
                 new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                      source, source_context, ts, kind=kind, lifecycle=lifecycle)
+                                      source, source_context, ts)
                 action.update(action="disputed", new_id=new_id,
                               note="weak contradiction -> old=disputed, new=active")
             else:
                 new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                      source, source_context, ts, kind=kind, lifecycle=lifecycle)
+                                      source, source_context, ts)
                 conn.execute(
                     "UPDATE memories SET status='superseded', superseded_by=?, "
                     "updated_at=?, superseded_at=? WHERE id=?",
@@ -607,7 +430,7 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
 
         else:  # COMPATIBLE / ADDITION
             new_id = _insert_fact(conn, new_fact, subject, "active", conf,
-                                  source, source_context, ts, kind=kind, lifecycle=lifecycle)
+                                  source, source_context, ts)
             action.update(action="added", new_id=new_id, note="compatible addition")
 
         conn.commit()
@@ -617,300 +440,29 @@ def apply_resolution(conn: sqlite3.Connection, existing_id: int, verdict: dict,
     return action
 
 
-EXIT_PARTIAL_FAILURE = 3  # distinct from 1 (usage error) and 2 (crash)
-
-
-from contextlib import contextmanager
-
-
-@contextmanager
-def _queue_lock(db_path: str):
-    """Exclusive lock around every read-modify-write of retry_queue.jsonl.
-
-    GO-E P3: without it, four concurrent writers produced 17 surviving lines out
-    of 80 — 79% silent loss. Each process read the same state, wrote its own
-    .tmp, and the last os.replace overwrote the others; one process even saw its
-    .tmp vanish mid-write (FileNotFoundError).
-
-    The lock is a sidecar file, so it protects the queue without touching the
-    DB's own locking. It is released by the OS if the process dies.
-    """
-    lock_path = Path(db_path).parent / "retry_queue.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = lock_path.open("a+")
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
-
-
-def _edge_uid(payload: dict) -> str:
-    """Stable identifier for one retry entry.
-
-    Derived from the fact's own identity, never from wall-clock time, so the
-    same unpersisted fact queued twice collapses to one entry (GO-D P0).
-    """
-    import hashlib as _h
-    key = "\x1f".join([
-        str(payload.get("content") or ""),
-        str(payload.get("subject") or ""),
-        str(payload.get("source_context") or ""),
-        str(payload.get("kind") or "fact"),
-        str(payload.get("lifecycle") or ""),
-    ])
-    return _h.sha256(key.encode("utf-8")).hexdigest()[:16]
-
-
-def _write_retry_queue(failed: list[dict], db_path: str) -> str:
-    """Persist the facts that could not be written — COMPLETE, not truncated.
-
-    GO-D P0: the previous version kept content[:80] and dropped subject,
-    provenance, kind and lifecycle. A queue like that cannot be replayed: the
-    fact comes back mangled and its source is gone. This version keeps the full
-    payload plus a stable uid, and de-duplicates by uid so a second lock does
-    not append the same entry twice.
-
-    The write is atomic (temp + rename): an interruption during the queue
-    write must not leave a half-line that breaks JSONL parsing on replay.
-    """
-    import datetime as _dt
-    qdir = Path(db_path).parent
-    queue = qdir / "retry_queue.jsonl"
-    ts = _dt.datetime.now().isoformat(timespec="seconds")
-    with _queue_lock(db_path):
-
-        existing = {}
-        if queue.exists():
-            for line in queue.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue          # tolerate a corrupted line rather than abort
-                uid = obj.get("uid") or _edge_uid(obj)
-                existing[uid] = obj
-
-        for f in failed:
-            payload = {
-                "content": f.get("content") or "",
-                "subject": f.get("subject"),
-                "source_context": f.get("source_context"),
-                "kind": f.get("kind") or "fact",
-                "lifecycle": f.get("lifecycle"),
-                "confidence": f.get("confidence"),
-                "queued_at": ts,
-                "db": str(db_path),
-            }
-            uid = _edge_uid(payload)
-            if uid in existing:
-                existing[uid]["last_seen_at"] = ts
-                existing[uid]["attempts"] = int(existing[uid].get("attempts", 1)) + 1
-            else:
-                payload["uid"] = uid
-                payload["attempts"] = 1
-                existing[uid] = payload
-
-        tmp = queue.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            for obj in existing.values():
-                fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-        os.replace(tmp, queue)
-        return str(queue)
-
-
-def _ack_retry_queue(stored_uids: list[str], db_path: str) -> int:
-    """Remove entries that are now durably persisted (GO-D-fix A).
-
-    Until this existed, a fact that failed once and succeeded on replay stayed in
-    the queue forever: every subsequent replay re-processed it. That is not data
-    loss, but it is a queue that never empties, and it hides real failures behind
-    a growing list of already-done work.
-
-    The ack is written atomically (temp + fsync + replace) so a crash mid-ack
-    cannot truncate the remaining entries.
-    """
-    with _queue_lock(db_path):
-        queue = Path(db_path).parent / "retry_queue.jsonl"
-        if not queue.exists() or not stored_uids:
-            return 0
-        keep, removed = [], 0
-        for line in queue.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                keep.append(line)          # corrupt lines are handled by quarantine
-                continue
-            if obj.get("uid") in stored_uids:
-                removed += 1
-                continue
-            keep.append(json.dumps(obj, ensure_ascii=False))
-
-        tmp = queue.with_suffix(".jsonl.ack.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            for ln in keep:
-                fh.write(ln + "\n")
-            fh.flush(); os.fsync(fh.fileno())
-        os.replace(tmp, queue)
-        return removed
-
-
-def _quarantine_corrupt_queue(db_path: str) -> dict:
-    """Move unparseable queue lines aside, without ever losing a valid one.
-
-    GO-E V1.2. It runs inside _queue_lock() and respects one ordering rule that
-    a SIGKILL test proved necessary:
-
-        1. write the side file (append + fsync + replace)
-        2. ONLY THEN rewrite the live queue without the corrupt lines
-
-    The earlier version replaced the live queue independently of the side file.
-    Killed between the two renames, it left the valid lines already rewritten
-    while the corrupt ones were not yet on disk — a valid entry vanished.
-
-    If step 1 fails, step 2 never runs: the queue keeps everything and the next
-    start retries. Corruption is never "resolved" by deletion.
-    """
-    qdir = Path(db_path).parent
-    queue = qdir / "retry_queue.jsonl"
-    side = qdir / "retry_queue.corrupt.jsonl"
-
-    with _queue_lock(db_path):
-        if not queue.exists():
-            return {"corrupt": 0, "valid": 0, "side_file": None}
-
-        raw = queue.read_text(encoding="utf-8").splitlines()
-        valid, corrupt = [], []
-        for line in raw:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                json.loads(line)
-                valid.append(line)
-            except json.JSONDecodeError:
-                corrupt.append(line)
-
-        if not corrupt:
-            return {"corrupt": 0, "valid": len(valid), "side_file": None}
-
-        # ── STEP 1: the side file, durably, BEFORE touching the live queue ──
-        existing = []
-        if side.exists():
-            existing = [l for l in side.read_text(encoding="utf-8").splitlines() if l.strip()]
-        tmp_side = side.with_suffix(".jsonl.tmp")
-        try:
-            with tmp_side.open("w", encoding="utf-8") as fh:
-                for l in existing:
-                    fh.write(l + "\n")
-                for c in corrupt:
-                    fh.write(c + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_side, side)
-            # fsync the directory so the rename itself survives a power cut
-            try:
-                dfd = os.open(str(qdir), os.O_RDONLY)
-                try:
-                    os.fsync(dfd)
-                finally:
-                    os.close(dfd)
-            except OSError:
-                pass
-        except Exception:
-            if tmp_side.exists():
-                tmp_side.unlink(missing_ok=True)
-            return {"corrupt": 0, "valid": len(valid), "side_file": None,
-                    "error": "side file write failed; queue left untouched"}
-
-        # ── STEP 2: the live queue, now that the corrupt lines are safe ──
-        tmp_q = queue.with_suffix(".jsonl.q.tmp")
-        with tmp_q.open("w", encoding="utf-8") as fh:
-            for v in valid:
-                fh.write(v + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_q, queue)
-
-    return {"corrupt": len(corrupt), "valid": len(valid), "side_file": str(side)}
-
-
 def _insert_fact(conn: sqlite3.Connection, content: str, subject: str | None,
                  status: str, confidence: float, source: str,
-                 source_context: str | None, ts: str,
-                 kind: str = "fact", lifecycle: str | None = None) -> int:
-    """Insert a new fact row AND its vector embedding.
+                 source_context: str | None, ts: str) -> int:
+    """Insert a new fact row (FTS5/vec triggers handle the rest).
 
-    v5.4-P1 (P0-A): the previous version wrote the row and relied on a
-    "subsequent index pass" that does not exist in auto_capture. 339/339
-    conflict-resolver facts in production had zero embeddings, making them
-    invisible to search_vector while still visible to BM25 — a silent index
-    drift.
-
-    The embedding is computed BEFORE opening the write transaction: the model
-    call can take seconds and must not hold the SQLite write lock. If the
-    embedding fails, the fact is still inserted but the row is left without a
-    vector and the caller is told (vec_ok=False), so nothing is lost and the
-    drift is observable rather than silent.
+    Note: no embedding is written here. Vector indexing of new facts is the
+    job of a subsequent `hybrid_search.py add`/`index` pass — the arbitrator
+    stays LLM-embedding-free so it can run offline.
     """
-    embedding = None
-    vec_error = None
-    try:
-        from hybrid_search import get_embedding, serialize_f32
-        embedding = get_embedding(content[:2000])
-    except Exception as e:  # noqa: BLE001 - any embedder failure is non-fatal
-        vec_error = f"{type(e).__name__}: {e}"
-
     cur = conn.execute(
         "INSERT INTO memories (content, category, layer, source, score, subject, "
-        "status, confidence, valid_from, source_context, last_confirmed, updated_at, "
-        "kind, lifecycle) "
-        "VALUES (?, 'fact', 'semantic', ?, 0.5, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (content, source, subject, status, confidence, ts, source_context, ts, ts,
-         kind, lifecycle),
+        "status, confidence, valid_from, source_context, last_confirmed, updated_at) "
+        "VALUES (?, 'fact', 'semantic', ?, 0.5, ?, ?, ?, ?, ?, ?, ?)",
+        (content, source, subject, status, confidence, ts, source_context, ts, ts),
     )
-    mem_id = cur.lastrowid
-
-    if embedding is not None:
-        try:
-            from hybrid_search import serialize_f32
-            conn.execute(
-                "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
-                (mem_id, serialize_f32(embedding)),
-            )
-        except sqlite3.OperationalError as e:
-            if "vec0" in str(e) or "no such module" in str(e):
-                # Infrastructure failure, not a fact-level problem: surface it.
-                raise RuntimeError(
-                    f"vector indexing unavailable on this connection: {e}. "
-                    f"load error at connect(): {_VEC_LOAD_ERROR}"
-                ) from e
-            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
-        except Exception as e:  # noqa: BLE001
-            vec_error = f"vec insert failed: {type(e).__name__}: {e}"
-
-    _LAST_VEC_STATUS["ok" if (embedding is not None and vec_error is None) else "failed"] += 1
-    _LAST_VEC_STATUS["last_error"] = vec_error
-    return mem_id
+    return cur.lastrowid
 
 
 # ─── High-level flows ─────────────────────────────────────────────────────────
 
 def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
                use_llm: bool = True, apply: bool = False,
-               split: bool = True, source_context: str | None = None,
-               source: str = "conflict-resolver",
-               kind: str = "fact", lifecycle: str | None = None) -> list[dict]:
+               split: bool = True) -> list[dict]:
     """Run the full pipeline for one (possibly compound) new statement.
 
     split=False trusts the caller to have supplied an already-atomic fact
@@ -926,27 +478,16 @@ def check_fact(conn: sqlite3.Connection, text: str, subject: str | None,
             if best is None or _rel_priority(verdict) > _rel_priority(best[1]):
                 best = (cand, verdict)
         if best is None:
-            action = None
-            if apply:
-                # v5.4-P1: a fact with no candidate must still be INSERTED.
-                # Returning action=None meant "first fact ever" was silently
-                # dropped: nothing was ever persisted for a new subject.
-                action = {"action": "added", "new_id": _insert_fact(
-                    conn, fact, subject, "active", 0.5, source,
-                    source_context or fact, now_iso(),
-                    kind=kind, lifecycle=lifecycle)}
             results.append({"fact": fact, "verdict": {
                 "relation": COMPATIBLE, "confidence": 0.5,
                 "reasoning": "no active candidate", "engine": "n/a"},
-                "existing_id": None, "action": action})
+                "existing_id": None, "action": None})
             continue
         cand, verdict = best
         action = None
         if apply:
             action = apply_resolution(conn, cand["id"], verdict, fact, subject,
-                                      source_context=source_context or text,
-                                      source=source,
-                                      kind=kind, lifecycle=lifecycle)
+                                      source_context=text)
         results.append({
             "fact": fact, "existing_id": cand["id"],
             "existing_content": cand["content"],
@@ -972,8 +513,6 @@ def cmd_check(args):
                      use_llm=not args.no_llm, apply=args.apply,
                      split=not args.no_split)
     print(json.dumps(res, indent=2, ensure_ascii=False))
-    if args.apply and conn.in_transaction:
-        conn.commit()
     if not args.apply:
         print("\n(analyse only — pass --apply to mutate the DB)")
     conn.close()
@@ -985,76 +524,29 @@ def cmd_arbitrate(args):
     path = Path(args.file)
     if not path.exists():
         raise SystemExit(f"❌ facts file not found: {path}")
-    # GO-D-fix B: a corrupt line must not vanish. Quarantine it first, then
-    # read only the valid entries.
-    q = _quarantine_corrupt_queue(args.db)
-    if q.get("corrupt"):
-        print(f"⚠️  QUEUE: {q['corrupt']} ligne(s) corrompue(s) mise(s) en quarantaine "
-              f"-> {q['side_file']}")
-
     facts = []
-    _incoming_uids = []
-    malformed = 0
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         try:
             obj = json.loads(line)
-            if isinstance(obj, dict) and obj.get("uid"):
-                _incoming_uids.append(obj["uid"])
             facts.append(obj if isinstance(obj, dict) else {"content": str(obj)})
         except json.JSONDecodeError:
-            # GO-D P4: a non-JSON line is a CORRUPT buffer, not a fact. The old
-            # code promoted the raw text to {"content": line}, so a truncated
-            # write or a stray log line became a memory entry — "NOT JSON AT ALL"
-            # was inserted verbatim by the tests. Corrupt lines are counted and
-            # skipped; they never reach the database.
-            malformed += 1
-            continue
+            facts.append({"content": line})
 
     if not args.apply and not args.force:
         print(f"⚠️  DRY-RUN: {len(facts)} fact(s) will be analysed, no mutation.")
     elif not args.apply:
         print("⚠️  --force without --apply has no effect (analysis is already safe).")
 
-    if malformed:
-        print(f"⚠️  BUFFER: {malformed} malformed line(s) skipped (not facts).")
     summary = {"added": 0, "superseded": 0, "disputed": 0, "confirmed": 0}
-    lock_failures = 0
-    pending = []
     for obj in facts:
         content = obj.get("content") or obj.get("fact") or ""
         subject = obj.get("subject") or args.subject
-        # v5.4-P1 provenance: prefer the message-level context carried by the
-        # buffer entry (message_id/session_id) over the raw fact text.
-        prov = obj.get("source_context")
-        if not prov and obj.get("message_id"):
-            prov = ("session=%s message=%s"
-                    % (obj.get("session_id") or "-", obj["message_id"]))
-        try:
-            results = check_fact(conn, content, subject,
-                                 use_llm=not args.no_llm, apply=args.apply,
-                                 split=not args.no_split,
-                                 source_context=prov or content,
-                                 kind=obj.get("kind") or "fact",
-                                 lifecycle=obj.get("lifecycle"))
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower():
-                raise
-            # v5.4-P1: a locked DB must not destroy the whole run. Keep the fact
-            # pending, finish the others, and report it explicitly at the end.
-            lock_failures += 1
-            pending.append({
-                "content": content,
-                "subject": subject,
-                "source_context": prov or content,
-                "kind": obj.get("kind") or "fact",
-                "lifecycle": obj.get("lifecycle"),
-                "confidence": obj.get("confidence"),
-            })
-            print(f"  [LOCKED] {content[:70]}  ← retried, still locked")
-            continue
+        results = check_fact(conn, content, subject,
+                             use_llm=not args.no_llm, apply=args.apply,
+                             split=not args.no_split)
         for r in results:
             act = (r.get("action") or {}).get("action")
             if act in summary:
@@ -1062,34 +554,9 @@ def cmd_arbitrate(args):
             tag = act or r["verdict"]["relation"].lower()
             print(f"  [{tag}] {r['fact'][:70]}  ← {r['verdict']['reasoning']}")
     print(f"\nSummary: {summary}")
-    if lock_failures:
-        # v5.4-P1 (GO-C P0): a non-persisted fact is NEVER a success.
-        # 1. write a durable retry queue so nothing is lost
-        # 2. return a non-zero exit code so callers cannot mistake this for OK
-        queue = _write_retry_queue(pending, args.db)
-        print(f"⚠️  FAILED: {lock_failures} fact(s) NOT persisted (database busy).")
-        print(f"   retry queue: {queue}")
-        print(f"   re-run: conflict_resolver.py --db {args.db} arbitrate {queue} --apply")
-        if not args.apply:
-            print("(dry-run — re-run with --apply to persist)")
-        conn.close()
-        return EXIT_PARTIAL_FAILURE
-    if args.apply:
-        # GO-C P3: apply_resolution commits per fact, but a trailing BEGIN
-        # IMMEDIATE from the next iteration can leave one open. Commit the
-        # remainder explicitly so nothing is lost at close().
-        if conn.in_transaction:
-            conn.commit()
-        # GO-D-fix A: acknowledge the entries that actually landed. Without this
-        # a replayed queue never empties: every future replay re-processes facts
-        # that are already stored, indefinitely.
-        acked = _ack_retry_queue(_incoming_uids, args.db)
-        if acked:
-            print(f"✅ ack: {acked} entr(ies) retirée(s) de retry_queue.jsonl")
     if not args.apply:
         print("(dry-run — re-run with --apply to persist)")
     conn.close()
-    return 0
 
 
 def cmd_lifecycle(args):
@@ -1274,12 +741,9 @@ def main():
     args = parser.parse_args()
     if not getattr(args, "func", None):
         parser.print_help()
-        return 0
-    # v5.4-P1 (GO-C P0): propagate the subcommand's return code. Before this,
-    # `main()` discarded it, so a partially failed run still exited 0 — the
-    # operational false success the audit flagged.
-    return args.func(args)
+        return
+    args.func(args)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
