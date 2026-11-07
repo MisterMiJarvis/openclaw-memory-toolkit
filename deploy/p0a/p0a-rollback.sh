@@ -5,8 +5,9 @@
 # N'effectue AUCUNE restauration SQLite (voir runbook §6b).
 set -euo pipefail
 
-D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
-BKFILE=/home/ubuntu/.p0a-backup-path
+# Chemins surchargeables pour les tests d'isolation (valeurs par défaut = production).
+D="${P0A_D:-/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search}"
+BKFILE="${P0A_BKFILE:-/home/ubuntu/.p0a-backup-path}"
 
 [ -f "$BKFILE" ] || { echo "ROLLBACK IMPOSSIBLE: $BKFILE absent"; exit 1; }
 BK=$(cat "$BKFILE")

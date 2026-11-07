@@ -74,12 +74,13 @@ AA=$(sha256sum "$D/auto_capture.py"      | cut -d' ' -f1)
 # ─────────────────────────────────────────────────────────────
 h2 "T-C : rollback NORMAL sur les artefacts réels"
 
-# le script réel, avec D et BKFILE redirigés vers la simulation
-sed -e "s#^D=.*#D=$D#" -e "s#^BKFILE=.*#BKFILE=$SIM/.p0a-backup-path#" \
-    "$SIM/deploy/p0a/p0a-rollback.sh" > "$SIM/rollback-sim.sh"
-chmod +x "$SIM/rollback-sim.sh"
-
-if bash "$SIM/rollback-sim.sh" >/dev/null 2>&1; then ok "rollback réel : PASS"; else ko "rollback réel : ÉCHEC"; fi
+# le script réel, invoqué tel quel, avec P0A_D / P0A_BKFILE redirigés
+if P0A_D="$D" P0A_BKFILE="$SIM/.p0a-backup-path" \
+     bash "$SIM/deploy/p0a/p0a-rollback.sh" >/dev/null 2>&1; then
+  ok "rollback réel : PASS"
+else
+  ko "rollback réel : ÉCHEC"
+fi
 
 RC=$(sha256sum "$D/conflict_resolver.py" | cut -d' ' -f1)
 RA=$(sha256sum "$D/auto_capture.py"      | cut -d' ' -f1)
@@ -87,24 +88,66 @@ RA=$(sha256sum "$D/auto_capture.py"      | cut -d' ' -f1)
 [ "$RA" = "$EXPECTED_A" ] && ok "fichier ACTIF auto_capture conforme"      || ko "fichier ACTIF auto_capture NON conforme"
 
 # ─────────────────────────────────────────────────────────────
-h2 "T-G2 : altération du fichier ACTIF après copie -> rollback REFUSE"
+h2 "T-G2 : rollback REFUSE quand les fichiers ACTIFS ne correspondent pas"
 
-# l'altération simule une copie corrompue : le manifeste dit OK, l'actif ne l'est pas
-cp -a "$D/conflict_resolver.py" "$SIM/conflict.bak"
-echo "# post-copy corruption" >> "$D/conflict_resolver.py"
+# Déterministe, sans concurrence, sans shim, sans sed.
+# La sauvegarde contient un fichier CORROMPU mais son manifeste déclare le SHA SAIN.
+# Le script copie la sauvegarde vers $D, puis vérifie $D contre le manifeste.
+# -> ACT_C != EXPECTED_C -> refus obligatoire.
+# L'ancien script (qui vérifiait $BK) aurait répondu PASS : c'est précisément
+# la régression que ce test verrouille.
 
-# on force le scénario : la sauvegarde est saine, l'actif est altéré après cp
-sed -i 's#^cp -a "$BK/conflict_resolver.py" "$D/conflict_resolver.py"#cp -a "$BK/conflict_resolver.py" "$D/conflict_resolver.py"; echo "# corrupted after copy" >> "$D/conflict_resolver.py"#' \
-  "$SIM/rollback-sim.sh"
+EXPECTED_C=4bb9d44c22edb4081464a19024b95e071adf1d2b85b1775fc79cdedb36b3a10a
+EXPECTED_A=087493f3b51b9e6df8d38b2a466f0b3218c33a9e327273a4224a1df33e8603f6
 
-if bash "$SIM/rollback-sim.sh" >/dev/null 2>&1; then
-  ko "rollback a annoncé PASS malgré un fichier ACTIF corrompu"
-else
-  ok "rollback REFUSE le PASS quand le fichier ACTIF est corrompu"
-fi
+BK_BAD="$SIM/bk-bad"; rm -rf "$BK_BAD"; mkdir -p "$BK_BAD"
+cp /home/ubuntu/cogitator-p0a-patch/orig/conflict_resolver.py "$BK_BAD/"
+cp /home/ubuntu/cogitator-p0a-patch/orig/auto_capture.py      "$BK_BAD/"
+# manifeste : valeurs SAINES attendues
+printf '%s  conflict_resolver.py\n%s  auto_capture.py\n' "$EXPECTED_C" "$EXPECTED_A" \
+  > "$BK_BAD/PY-SHA256.txt"
+# puis on corrompt le fichier sauvegardé APRÈS avoir écrit le manifeste
+printf '\n# corrupted after manifest\n' >> "$BK_BAD/conflict_resolver.py"
 
-# restaure un état sain pour la suite
-cp -a "$SIM/conflict.bak" "$D/conflict_resolver.py"
+# vérification préalable : la sauvegarde est bien corrompue, le manifeste bien sain
+BK_SHA=$(sha256sum "$BK_BAD/conflict_resolver.py" | cut -d' ' -f1)
+[ "$BK_SHA" != "$EXPECTED_C" ] && ok "sauvegarde volontairement corrompue" || ko "sauvegarde NON corrompue — scénario invalide"
+grep -q "$EXPECTED_C" "$BK_BAD/PY-SHA256.txt" && ok "manifeste déclare le SHA sain" || ko "manifeste invalide"
+
+D_BAD="$SIM/tg2-install"; rm -rf "$D_BAD"; mkdir -p "$D_BAD"
+printf '%s  %s\n' "$EXPECTED_C" conflict_resolver.py > "$SIM/bkpath-bad"
+echo "$BK_BAD" > "$SIM/.p0a-tg2-bk"
+
+OUT="$SIM/tg2.out"
+P0A_D="$D_BAD" P0A_BKFILE="$SIM/.p0a-tg2-bk" \
+  bash "$SIM/deploy/p0a/p0a-rollback.sh" >"$OUT" 2>&1
+RC=$?
+
+[ "$RC" -ne 0 ] && ok "rollback sort en code non nul (rc=$RC)" || ko "rollback rc=0 malgré actif non conforme"
+grep -q "ROLLBACK NORMAL OK" "$OUT" \
+  && ko "message de succès émis malgré actif non conforme" \
+  || ok "aucun message de succès émis"
+grep -q "conflict_resolver.py actif" "$OUT" \
+  && ok "échec attribué au fichier ACTIF" \
+  || { ko "échec non attribué au fichier actif"; sed -n '1,5p' "$OUT"; }
+
+# --- cas POSITIF : sauvegarde saine + manifeste sain -> doit réussir
+BK_OK="$SIM/bk-ok"; rm -rf "$BK_OK"; mkdir -p "$BK_OK"
+cp /home/ubuntu/cogitator-p0a-patch/orig/conflict_resolver.py "$BK_OK/"
+cp /home/ubuntu/cogitator-p0a-patch/orig/auto_capture.py      "$BK_OK/"
+( cd "$BK_OK" && sha256sum conflict_resolver.py auto_capture.py > PY-SHA256.txt )
+echo "$BK_OK" > "$SIM/.p0a-tg2-bk-ok"
+
+D_OK="$SIM/tg2-ok"; rm -rf "$D_OK"; mkdir -p "$D_OK"
+echo "# drift avant rollback" > "$D_OK/conflict_resolver.py"
+
+P0A_D="$D_OK" P0A_BKFILE="$SIM/.p0a-tg2-bk-ok" \
+  bash "$SIM/deploy/p0a/p0a-rollback.sh" >"$SIM/tg2b.out" 2>&1 \
+  && ok "rollback normal réussit quand tout est conforme" \
+  || { ko "rollback normal échoue"; sed -n '1,5p' "$SIM/tg2b.out"; }
+
+RC1=$(sha256sum "$D_OK/conflict_resolver.py" | cut -d' ' -f1)
+[ "$RC1" = "$EXPECTED_C" ] && ok "actif restauré conforme (cas positif)" || ko "actif NON conforme"
 
 # ─────────────────────────────────────────────────────────────
 h2 "T-D : placeholders dans les heredocs python"
