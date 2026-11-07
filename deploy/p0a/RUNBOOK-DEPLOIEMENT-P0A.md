@@ -1,213 +1,336 @@
 # RUNBOOK — Déploiement P0-A (conflict_resolver.py + auto_capture.py)
 
-**Version** : 1.0 — 2026-11-07
+**Version** : 2.0 — 2026-11-07
 **Cible** : OpenClaw 2026.10.8 (dc2523e) — skill `memory-health`
 **Statut** : PRÊT POUR CONTRE-AUDIT — **NON DÉPLOYÉ**
+**Base de référence** : commit `p0a-package-deployment` (figé, voir §0)
+
+Toutes les valeurs sont **inline dans les scripts** : aucun placeholder à substituer
+manuellement. Chaque étape critique **sort en erreur non nulle** en cas d'échec.
 
 ---
 
-## 0. SHA de référence
+## 0. Ancrage : récupérer les patches depuis le commit figé
 
-| fichier | SHA256 installé (AVANT) | SHA256 patché (APRÈS) |
-|---|---|---|
-| `conflict_resolver.py` | `4bb9d44c22edb4081464a19024b95e071adf1d2b85b1775fc79cdedb36b3a10a` | `0527f5d490438bde4f7cec83ade8e7a8614de1746850558745d64e9df9df3c21` |
-| `auto_capture.py` | `087493f3b51b9e6df8d38b2a466f0b3218c33a9e327273a4224a1df33e8603f6` | `5f256b8e30b5c48929852544fb4999b543e37571794508abc5d3920feed91fda` |
-
-Répertoire cible : `/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/`
-
----
-
-## 1. Préflight — NO-GO si un seul contrôle échoue
+Les patches ne doivent **jamais** venir d'un répertoire local non versionné.
 
 ```bash
+set -euo pipefail
+REPO=/home/ubuntu/cogitator-audit/openclaw-memory-toolkit
+COMMIT=<SHA_DU_COMMIT_CORRECTIF>      # à remplacer par le SHA livré
+PKG=/home/ubuntu/p0a-pkg
+
+rm -rf "$PKG"; mkdir -p "$PKG"
+cd "$REPO"
+git fetch origin >/dev/null
+git cat-file -e "$COMMIT^{commit}" || { echo "NO-GO: commit $COMMIT absent"; exit 1; }
+git archive "$COMMIT" deploy/p0a | tar -x -C "$PKG"
+test -f "$PKG/deploy/p0a/conflict_resolver.patch" || { echo "NO-GO: patch absent"; exit 1; }
+test -f "$PKG/deploy/p0a/auto_capture.patch"      || { echo "NO-GO: patch absent"; exit 1; }
+
+# les patches extraits doivent avoir l'empreinte attendue
+cd "$PKG/deploy/p0a"
+sha256sum -c SHA_PATCHES.txt || { echo "NO-GO: patch modifié"; exit 1; }
+```
+
+---
+
+## 1. Préflight — bloquant
+
+```bash
+set -euo pipefail
 D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
-sha256sum $D/conflict_resolver.py $D/auto_capture.py
+EXPECTED_CONFLICT=4bb9d44c22edb4081464a19024b95e071adf1d2b85b1775fc79cdedb36b3a10a
+EXPECTED_CAPTURE=087493f3b51b9e6df8d38b2a466f0b3218c33a9e327273a4224a1df33e8603f6
+
+for f in conflict_resolver.py auto_capture.py; do
+  [ -f "$D/$f" ] || { echo "NO-GO: $f absent"; exit 1; }
+done
+
+ACT_CONFLICT=$(sha256sum "$D/conflict_resolver.py" | cut -d' ' -f1)
+ACT_CAPTURE=$(sha256sum "$D/auto_capture.py"      | cut -d' ' -f1)
+
+[ "$ACT_CONFLICT" = "$EXPECTED_CONFLICT" ] || {
+  echo "NO-GO: conflict_resolver.py SHA=$ACT_CONFLICT attendu=$EXPECTED_CONFLICT"; exit 1; }
+[ "$ACT_CAPTURE" = "$EXPECTED_CAPTURE" ] || {
+  echo "NO-GO: auto_capture.py SHA=$ACT_CAPTURE attendu=$EXPECTED_CAPTURE"; exit 1; }
+
+# aucun process long ne doit tenir les modules en mémoire
+if pgrep -af "memory-health|hybrid_search|auto_capture|conflict_resolver" | grep -v grep >/dev/null; then
+  echo "NO-GO: process memory-health actif"; exit 1
+fi
+
+# espace disque : 5 GiB minimum
+AVAIL=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+[ "$AVAIL" -ge 5368709120 ] || { echo "NO-GO: espace libre ${AVAIL}o < 5GiB"; exit 1; }
+
+echo "PASS préflight"
 ```
-
-**Attendu** : les deux SHA « AVANT » ci-dessus, à l'octet près.
-
-Si divergence → **STOP**. Le fichier installé a changé depuis la qualification.
-Ne pas déployer, re-qualifier.
-
-```bash
-# gateway actif ?
-systemctl --user is-active openclaw-gateway
-
-# pas de migration/backfill en cours ?
-pgrep -af "memory-health|hybrid_search|auto_capture" | grep -v grep
-
-# espace disque (sauvegarde = ~700 Mo)
-df -h / | tail -1
-```
-
-**GO si** : SHA conformes · gateway `active` · aucun process memory-health · ≥ 5 Go libres.
-**NO-GO sinon.**
 
 ---
 
-## 2. Sauvegarde
+## 2. Sauvegarde — bloquante
 
 ### 2a. Fichiers Python
 
 ```bash
+set -euo pipefail
+D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
 BK=/home/ubuntu/backups/p0a-$(date +%Y%m%d-%H%M%S)
-mkdir -p $BK
-cp -a $D/conflict_resolver.py $D/auto_capture.py $BK/
-sha256sum $BK/*.py > $BK/PY-SHA256.txt
+mkdir -p "$BK"
+cp -a "$D/conflict_resolver.py" "$BK/conflict_resolver.py"
+cp -a "$D/auto_capture.py"      "$BK/auto_capture.py"
+
+# les copies doivent être bit-à-bit identiques aux originaux
+cmp -s "$D/conflict_resolver.py" "$BK/conflict_resolver.py" || { echo "NO-GO: copie altérée"; exit 1; }
+cmp -s "$D/auto_capture.py"      "$BK/auto_capture.py"      || { echo "NO-GO: copie altérée"; exit 1; }
+
+sha256sum "$BK"/*.py > "$BK/PY-SHA256.txt"
+echo "$BK" > /home/ubuntu/.p0a-backup-path
+echo "PASS sauvegarde py -> $BK"
 ```
 
 ### 2b. Base SQLite cohérente (avec WAL)
 
-**Ne pas copier le `.sqlite` à chaud.** Utiliser `sqlite3.backup()` :
-
 ```bash
-python3 - <<'PY'
-import sqlite3
-src = "/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db"
-dst = "$BK/agent_memory.db"   # remplacer $BK
+set -euo pipefail
+BK=$(cat /home/ubuntu/.p0a-backup-path)
+SRC=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db
+DST="$BK/agent_memory.db"
+
+python3 - "$SRC" "$DST" <<'PY'
+import sqlite3, sys, os
+src, dst = sys.argv[1], sys.argv[2]
+if not os.path.exists(src):
+    sys.exit("NO-GO: base source absente")
 s = sqlite3.connect(src); d = sqlite3.connect(dst)
 s.backup(d); d.close(); s.close()
-print("backup OK")
+print("backup écrit:", dst, os.path.getsize(dst), "octets")
 PY
 
-# vérification
-python3 -c "
-import sqlite3
-c=sqlite3.connect('file:$BK/agent_memory.db?mode=ro',uri=True)
-print('integrity:', c.execute('pragma integrity_check').fetchone()[0])
-print('memories :', c.execute('select count(*) from memories').fetchone()[0])
-print('vec      :', c.execute('select count(*) from memories_vec_rowids').fetchone()[0])
-c.close()"
+# le fichier doit exister et être intègre
+[ -s "$DST" ] || { echo "NO-GO: backup vide"; exit 1; }
+python3 - "$DST" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+ic = c.execute("pragma integrity_check").fetchone()[0]
+fk = len(c.execute("pragma foreign_key_check").fetchall())
+mem = c.execute("select count(*) from memories").fetchone()[0]
+vec = c.execute("select count(*) from memories_vec_rowids").fetchone()[0]
+c.close()
+print("integrity=%s fk=%d memories=%d vec=%d" % (ic, fk, mem, vec))
+if ic != "ok":
+    sys.exit("NO-GO: backup integrity_check=" + ic)
+if fk != 0:
+    sys.exit("NO-GO: backup foreign_key_check=%d" % fk)
+if mem == 0:
+    sys.exit("NO-GO: backup sans données")
+PY
+echo "PASS sauvegarde SQLite"
 ```
 
-**Attendu** : `integrity: ok`, `memories: 35926`, `vec: 35517` (± écritures concurrentes depuis la qualification).
-
-**Note** : la base est en WAL. `sqlite3.backup()` capture un état transactionnellement cohérent — c'est ce qui rend le `.backup` fiable alors qu'une copie `cp` du seul `.sqlite` ne l'est pas.
+> **Note** : `sqlite3.backup()` capture un état transactionnellement cohérent.
+> Une copie `cp` du seul `.sqlite` **ne l'est pas** en mode WAL.
 
 ---
 
-## 3. Installation contrôlée
+## 3. Installation contrôlée — bloquante
 
 ```bash
-P=/home/ubuntu/cogitator-p0a-patch
+set -euo pipefail
+D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
+PKG=/home/ubuntu/p0a-pkg/deploy/p0a
+EXPECTED_CONFLICT_AFTER=0527f5d490438bde4f7cec83ade8e7a8614de1746850558745d64e9df9df3c21
+EXPECTED_CAPTURE_AFTER=5f256b8e30b5c48929852544fb4999b543e37571794508abc5d3920feed91fda
 
-# appliquer les patches (pas de copie directe : le patch échoue si le contexte a bougé)
-patch -p0 --dry-run $D/conflict_resolver.py < $P/conflict_resolver.patch
-patch -p0 --dry-run $D/auto_capture.py      < $P/auto_capture.patch
+# dry-run : les patches doivent s'appliquer sans conflit
+patch -p0 --dry-run "$D/conflict_resolver.py" < "$PKG/conflict_resolver.patch" \
+  || { echo "NO-GO: patch conflict_resolver ne s'applique pas"; exit 1; }
+patch -p0 --dry-run "$D/auto_capture.py" < "$PKG/auto_capture.patch" \
+  || { echo "NO-GO: patch auto_capture ne s'applique pas"; exit 1; }
 
-# si les deux dry-run disent "checking file ... " sans erreur :
-patch -p0 $D/conflict_resolver.py < $P/conflict_resolver.patch
-patch -p0 $D/auto_capture.py      < $P/auto_capture.patch
+# application
+patch -p0 "$D/conflict_resolver.py" < "$PKG/conflict_resolver.patch" \
+  || { echo "ÉCHEC conflict_resolver — rollback"; bash /home/ubuntu/p0a-rollback.sh; exit 1; }
+patch -p0 "$D/auto_capture.py" < "$PKG/auto_capture.patch" \
+  || { echo "ÉCHEC auto_capture — rollback des DEUX"; bash /home/ubuntu/p0a-rollback.sh; exit 1; }
 
-# vérification post-installation
-sha256sum $D/conflict_resolver.py $D/auto_capture.py
+# vérification SHA post-installation — BLOQUANTE
+ACT_C=$(sha256sum "$D/conflict_resolver.py" | cut -d' ' -f1)
+ACT_A=$(sha256sum "$D/auto_capture.py"      | cut -d' ' -f1)
+if [ "$ACT_C" != "$EXPECTED_CONFLICT_AFTER" ] || [ "$ACT_A" != "$EXPECTED_CAPTURE_AFTER" ]; then
+  echo "NO-GO: SHA post-install divergents"
+  echo "  conflict attendu=$EXPECTED_CONFLICT_AFTER obtenu=$ACT_C"
+  echo "  capture  attendu=$EXPECTED_CAPTURE_AFTER obtenu=$ACT_A"
+  bash /home/ubuntu/p0a-rollback.sh
+  exit 1
+fi
+echo "PASS installation (SHA conformes)"
 ```
 
-**Attendu** : les deux SHA « APRÈS ». Si différent → **rollback immédiat (§6)**.
+> **Règle** : un patch partiel (un fichier sur deux) **n'est jamais acceptable**.
+> Tout écart SHA déclenche le rollback des **deux** fichiers.
 
 ---
 
-## 4. Smoke test — sans écrire dans la base active
+## 4. Smoke non destructif — bloquant
+
+**Aucune écriture dans la base active.** Aucun fait artificiel.
 
 ```bash
-cd $D
+set -euo pipefail
+D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
+cd "$D"
+
 python3 - <<'PY'
-import sys
+import sys, sqlite3
 sys.path.insert(0, "/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search")
-import conflict_resolver as cr
-import auto_capture as ac
-print("conflict_resolver:", cr.__file__)
-print("vector_status présent:", hasattr(cr, "vector_status"))
-print("_report_vector_coverage présent:", hasattr(ac, "_report_vector_coverage"))
-print("vector_status() =", cr.vector_status())
+
+fail = []
+
+# 1. imports des deux modules
+try:
+    import conflict_resolver as cr
+    import auto_capture as ac
+except Exception as e:
+    sys.exit("NO-GO: import échoué: %s: %s" % (type(e).__name__, e))
+
+# 2. API attendue présente
+for mod, attr in ((cr, "vector_status"), (ac, "_report_vector_coverage")):
+    if not hasattr(mod, attr):
+        fail.append("%s.%s absent" % (mod.__name__, attr))
+
+# 3. vector_status initialisé proprement
+st = cr.vector_status()
+if set(st) != {"ok", "failed", "last_error"}:
+    fail.append("vector_status malformé: %r" % (st,))
+
+# 4. sqlite_vec réellement chargeable
+try:
+    import sqlite_vec
+    p = sqlite_vec.loadable_path()
+    if not p:
+        fail.append("sqlite_vec.loadable_path() vide")
+except Exception as e:
+    fail.append("sqlite_vec KO: %s: %s" % (type(e).__name__, e))
+
+# 5. memories_vec REQUÊTABLE sur la base active (lecture seule)
+try:
+    c = sqlite3.connect("file:/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db?mode=ro", uri=True)
+    c.enable_load_extension(True)
+    import sqlite_vec as sv
+    c.load_extension(sv.loadable_path())
+    c.enable_load_extension(False)
+    n = c.execute("select count(*) from memories_vec").fetchone()[0]
+    r = c.execute("select count(*) from memories_vec_rowids").fetchone()[0]
+    c.close()
+    if n <= 0:
+        fail.append("memories_vec vide (%d)" % n)
+    print("  memories_vec=%d rowids=%d" % (n, r))
+except Exception as e:
+    fail.append("memories_vec non requêtable: %s: %s" % (type(e).__name__, e))
+
+# 6. rapport de couverture exécutable SANS écrire
+try:
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ac._report_vector_coverage(
+            "/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db",
+            "1990-01-01 00:00:00", "1990-01-02 00:00:00", 0)
+    out = buf.getvalue()
+    for need in ("GLOBAL", "WINDOW", "RUN attribution", "UNKNOWN"):
+        if need not in out:
+            fail.append("rapport: '%s' manquant" % need)
+    print("  rapport OK")
+except Exception as e:
+    fail.append("rapport KO: %s: %s" % (type(e).__name__, e))
+
+if fail:
+    sys.exit("NO-GO smoke:\n  - " + "\n  - ".join(fail))
+print("PASS smoke non destructif")
 PY
 ```
 
-**Attendu** : les trois `True`, `{'ok': 0, 'failed': 0, 'last_error': None}`.
-
-**Ce smoke ne fait AUCUNE insertion.** Il vérifie uniquement que les modules s'importent et exposent les nouvelles fonctions.
-
-### Smoke optionnel en lecture seule (couverture réelle)
-
-```bash
-cd $D && python3 -c "
-import auto_capture as ac
-ac._report_vector_coverage('agent_memory.db', '1990-01-01 00:00:00', '1990-01-02 00:00:00', 0)
-"
-```
-
-**Attendu** : `GLOBAL 0/409`, `WINDOW 0/0`, `RUN attribution : UNKNOWN`, `status : UNKNOWN`.
-
 ---
 
-## 5. Critères GO/NO-GO après installation
+## 5. Baseline de couverture (mesure, pas invariant)
 
-| contrôle | GO | NO-GO |
-|---|---|---|
-| SHA post-installation | = APRÈS | ≠ |
-| imports | OK | ImportError |
-| `vector_status` | présent | absent |
-| `_report_vector_coverage` | présent | absent |
-| GLOBAL dans le rapport | `0/409` | autre valeur |
-| gateway | inchangé, actif | down |
+`GLOBAL 0/409` **n'est pas un critère de GO**. On mesure l'état **juste avant** le
+déploiement et on vérifie l'absence de **régression** ensuite.
 
-**Le gateway n'a pas besoin de redémarrer** : les scripts sont importés à chaque invocation par `auto_capture`, pas chargés au démarrage du daemon. Sauf si un process long les tient en mémoire — à vérifier par `pgrep`.
+```bash
+set -euo pipefail
+BK=$(cat /home/ubuntu/.p0a-backup-path)
+python3 - "$BK/baseline-coverage.txt" <<'PY'
+import sys, sqlite3
+dst = sys.argv[1]
+c = sqlite3.connect("file:/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db?mode=ro", uri=True)
+tot, vec = c.execute(
+    "SELECT COUNT(*), COUNT(v.rowid) FROM memories m "
+    "LEFT JOIN memories_vec_rowids v ON v.rowid = m.id "
+    "WHERE m.source = 'conflict-resolver'").fetchone()
+allm = c.execute("select count(*) from memories").fetchone()[0]
+allv = c.execute("select count(*) from memories_vec_rowids").fetchone()[0]
+c.close()
+line = "cr_total=%d cr_vec=%d all_total=%d all_vec=%d\n" % (tot, vec, allm, allv)
+open(dst, "w").write(line)
+print(line.strip())
+PY
+echo "Baseline enregistrée — comparer après 48 h, alerter si cr_vec DIMINUE."
+```
+
+> P0-B (backfill des 409) reste **séparé**. Ce runbook ne le traite pas.
 
 ---
 
 ## 6. Rollback
 
-```bash
-# 1. restaurer les fichiers
-cp -a $BK/conflict_resolver.py $D/conflict_resolver.py
-cp -a $BK/auto_capture.py      $D/auto_capture.py
-sha256sum $D/conflict_resolver.py $D/auto_capture.py   # = SHA AVANT
+Deux procédures **distinctes**. Ne jamais les confondre.
 
-# 2. (si la base a été altérée) restaurer la copie cohérente
-python3 - <<'PY'
-import sqlite3
-src = "$BK/agent_memory.db"  # remplacer $BK
-dst = "/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search/agent_memory.db"
-s = sqlite3.connect(src); d = sqlite3.connect(dst)
-s.backup(d); d.close(); s.close()
-print("rollback DB OK")
-PY
+### 6a. Rollback NORMAL — restauration des deux fichiers Python
+
+```bash
+#!/usr/bin/env bash
+# /home/ubuntu/p0a-rollback.sh
+set -euo pipefail
+D=/home/ubuntu/.openclaw/workspace/skills/memory-health/hybrid-search
+BK=$(cat /home/ubuntu/.p0a-backup-path)
+[ -d "$BK" ] || { echo "ROLLBACK IMPOSSIBLE: $BK absent"; exit 1; }
+
+cp -a "$BK/conflict_resolver.py" "$D/conflict_resolver.py"
+cp -a "$BK/auto_capture.py"      "$D/auto_capture.py"
+
+# preuve : SHA restaurés == SHA d'origine
+( cd "$BK" && sha256sum -c PY-SHA256.txt --status ) \
+  || { echo "ROLLBACK: SHA restaurés non conformes"; exit 1; }
+
+echo "ROLLBACK NORMAL OK — deux fichiers restaurés"
 ```
 
-**Règle** : le rollback restaure les **deux** fichiers Python ensemble. Jamais un seul.
+### 6b. Restauration SQLite — EXCEPTIONNELLE, jamais automatique
+
+**Interdite en rollback de P0-A.** Une restauration de base annulerait toutes les
+écritures faites depuis le snapshot (mémoires, faits, sessions).
+
+Exigences avant toute exécution :
+
+1. Décision explicite, écrite, hors runbook
+2. Arrêt de **toutes** les écritures (gateway arrêté, `lsof` vide)
+3. Analyse et sauvegarde des données créées **depuis** le snapshot
+4. Comparaison : ce qui serait perdu vs ce qui serait récupéré
+5. Nouvelle sauvegarde de l'état courant avant d'écraser
+
+```bash
+# NE PAS EXÉCUTER SANS DÉCISION EXPLICITE
+# set -euo pipefail
+# BK=$(cat /home/ubuntu/.p0a-backup-path)
+# ... procédure volontairement non fournie ici ...
+```
 
 ---
 
-## 7. Risques résiduels documentés
-
-### R1 — F3b : `memories_vec` absente, extension chargée
-Si la table `memories_vec` disparaît (corruption, migration ratée) alors que `sqlite_vec` est chargé, l'insertion du vecteur échoue sur `no such table` et l'erreur est **avalée** dans `except Exception`. Le fait est écrit, `vector_status()` enregistre `failed+1`, mais **rien ne remonte à l'appelant**.
-**Impact** : capture silencieusement non vectorisée.
-**Mitigation** : lire `vector_status()` en fin de run, ou surveiller `WINDOW_PARTIAL` dans le rapport.
-**Statut** : non bloquant, cas anormal.
-
-### R2 — Latence synchrone
-`get_embedding()` est appelé **avant** la transaction, dans le même fil. Mesuré : **38 ms p50** à chaud, 94 % du temps de capture.
-Sur 100 faits : ~4 s. Aucune file asynchrone n'a été introduite.
-**Avantage** : l'embedding ne tient jamais le verrou d'écriture SQLite — les autres writers ne sont pas bloqués.
-
-### R3 — Indisponibilité Ollama
-`get_embedding(retries=3)` avec timeouts croissants **(30 s, 60 s, 120 s)** → jusqu'à **210 s** de blocage par fait avant échec définitif.
-**Disjoncteur** : `EMBED_BREAKER_THRESHOLD = 3` (env override possible). Après 3 échecs consécutifs → `EmbeddingEndpointDown`, pipeline interrompu.
-**Comportement du patch** : le fait est **quand même écrit**, sans vecteur ; `vector_status()` porte l'erreur.
-**Risque** : un Ollama lent peut bloquer la capture plusieurs minutes avant que le disjoncteur ne coupe.
-
-### R4 — Limites du reporting WINDOW / RUN UNKNOWN
-- `WINDOW_COMPLETE` **ne signifie pas** que le run est complet — la fenêtre peut contenir des écritures concurrentes.
-- `RUN attribution : UNKNOWN` est structurel : la base n'a **aucun marqueur de run**. `source` identifie le producteur, pas l'invocation.
-- `WINDOW_PARTIAL` est le seul signal fiable d'une vectorisation incomplète.
-
-### R5 — Pas de backfill
-Les **409 faits historiques** `conflict-resolver` restent **sans vecteur**. C'est volontaire. Ils resteront invisibles à `search_vector` jusqu'à un backfill explicitement décidé.
-
----
-
-## 8. Timeouts et retries réellement configurés (documentés, non modifiés)
+## 7. Timeouts et retries réellement configurés (documentés, non modifiés)
 
 | paramètre | valeur | source |
 |---|---|---|
@@ -220,18 +343,57 @@ Les **409 faits historiques** `conflict-resolver` restent **sans vecteur**. C'es
 | Backoff HTTP 429/5xx | `min(5*(attempt+1), 15)` s | idem |
 | Disjoncteur | `3` échecs consécutifs | `EMBED_BREAKER_THRESHOLD` |
 
-**Aucune de ces valeurs n'est modifiée par P0-A.**
+---
+
+## 8. Risques résiduels
+
+### R1 — F3b : `memories_vec` absente, extension chargée
+L'insertion du vecteur échoue sur `no such table`, l'erreur est **avalée** dans
+`except Exception`. Le fait est écrit, `vector_status()` enregistre `failed+1`,
+mais rien ne remonte à l'appelant.
+**Statut** : non bloquant (cas anormal). Mitigation : lire `vector_status()` en fin
+de run, surveiller `WINDOW_PARTIAL`.
+
+### R2 — Latence synchrone
+`get_embedding()` appelé avant la transaction, même fil. Mesuré **38 ms p50**
+à chaud, 94 % du temps de capture. 100 faits ≈ 4 s.
+L'embedding ne tient **jamais** le verrou d'écriture SQLite.
+
+### R3 — Indisponibilité Ollama
+Jusqu'à **210 s** de blocage par fait (30+60+120) avant échec définitif.
+Disjoncteur à 3 échecs consécutifs → `EmbeddingEndpointDown`.
+Le fait est quand même écrit, sans vecteur.
+
+### R4 — Limites du reporting
+`WINDOW_COMPLETE` ≠ « run complet » (écritures concurrentes possibles).
+`RUN attribution : UNKNOWN` est structurel : aucun marqueur de run en base.
+
+### R5 — Pas de backfill
+Les 409 faits historiques restent sans vecteur. **P0-B, séparé.**
 
 ---
 
-## 9. Ordre d'exécution résumé
+## 9. Limites réelles des preuves (à ne pas surinterpréter)
+
+| preuve | ce qu'elle ne démontre PAS |
+|---|---|
+| **F2** (échec transactionnel) | Ne simule pas un échec de **commit** : la connexion fermée produit `ProgrammingError`, pas un `SQLITE_FULL`/`SQLITE_BUSY` en phase de commit. La propagation d'une erreur réelle de commit n'est pas prouvée. |
+| **Benchmark** | Mesure les opérations constitutives (embedding, insert, commit) **séparément**. Ce n'est **pas** `_insert_fact()` de bout en bout : les branchements du patch, `vector_status()`, la gestion d'erreur et les imports ne sont pas dans la mesure. |
+| **Compteurs `vector_status()`** | Le benchmark insère via **SQL direct**, pas via `_insert_fact()`. Les compteurs `ok`/`failed` restent donc à **0** — ils ne reflètent pas les insertions mesurées. |
+| **F3** (sqlite_vec KO) | Simule l'échec de `loadable_path()`. Ne couvre pas un échec `load_extension()` sur une bibliothèque présente mais corrompue. |
+| **F3b** (table absente) | L'erreur est avalée — c'est le comportement testé, pas un correctif. |
+
+---
+
+## 10. Ordre d'exécution
 
 ```
-1. Préflight SHA           → NO-GO si divergence
-2. Sauvegarde py + SQLite  → vérifier integrity
-3. dry-run patch ×2        → NO-GO si conflit
-4. application patch       → vérifier SHA APRÈS
-5. smoke import            → NO-GO si ImportError
-6. rapport lecture seule   → GLOBAL doit être 0/409
-7. surveillance 48 h       → vector_status + WINDOW_PARTIAL
+§0  Récupération patches depuis commit figé   → NO-GO si archive/KO
+§1  Préflight SHA + process + disque           → NO-GO bloquant
+§2  Sauvegarde py (cmp) + SQLite (backup+check) → NO-GO bloquant
+§3  dry-run, application, SHA post-install     → rollback des deux si écart
+§4  Smoke non destructif (imports+vec+rapport)  → NO-GO bloquant
+§5  Baseline couverture (mesure, pas invariant)
+§7  Surveillance 48 h : vector_status + WINDOW_PARTIAL
+§6a Rollback normal disponible à tout moment
 ```
