@@ -1,0 +1,2 @@
+4d3f9d10d4a9bc9cfba8075a01279f94f13aef993a1035543d0d2ec44adf20a5  conflict_resolver.patch
+9779c71378c0cee6e1abe9bf02d6c46d719d06ca85a7b3c248192612e31f8c74  auto_capture.patch

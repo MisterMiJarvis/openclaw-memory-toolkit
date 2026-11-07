@@ -30,7 +30,8 @@ test -f "$PKG/deploy/p0a/auto_capture.patch"      || { echo "NO-GO: patch absent
 
 # les patches extraits doivent avoir l'empreinte attendue
 cd "$PKG/deploy/p0a"
-sha256sum -c SHA_PATCHES.txt || { echo "NO-GO: patch modifié"; exit 1; }
+[ -f PATCH-SHA256.txt ] || { echo "NO-GO: manifeste PATCH-SHA256.txt absent du commit"; exit 1; }
+sha256sum -c PATCH-SHA256.txt || { echo "NO-GO: patch modifié"; exit 1; }
 ```
 
 ---
